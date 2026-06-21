@@ -1568,9 +1568,14 @@ function badgesHTML(m) {
   return b.length ? `<div class="badges">${b.join("")}</div>` : "";
 }
 
+function materialNeedsRevision(m) {
+  return (m.usage || []).some(u => u.needs_revision);
+}
+
 function cardHTML(m, i) {
   const skills = (m.skills || []).map(s =>
     `<span class="badge">${esc(s)}</span>`).join("");
+  const needsRev = materialNeedsRevision(m);
   const foot = [];
   if (m.duration_min) foot.push(`<span>${icon("clock")}${m.duration_min} min</span>`);
   const nFiles = (m.files || []).length;
@@ -1594,6 +1599,7 @@ function cardHTML(m, i) {
       <div class="card-title">${highlight(m.title, filters.q)}</div>
       ${badgesHTML(m)}
       ${skills ? `<div class="badges">${skills}</div>` : ""}
+      ${needsRev ? `<div class="badges"><span class="revbadge">${icon("alert")}Needs revision</span></div>` : ""}
       ${foot.length ? `<div class="card-foot">${foot.join("")}</div>` : ""}
     </div>
     ${icon("chevron", "card-chev")}
