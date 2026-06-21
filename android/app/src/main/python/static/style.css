@@ -41,6 +41,7 @@
   --warn-ink: #8A5200;
   --warn-soft: #FBF1DD;
   --warn-border: #EDD7A4;
+  --star: #E8A317;
   --toast-ok: #4ADE80;
   --toast-danger: #FF8A93;
 
@@ -103,6 +104,7 @@
   --warn-ink: #F5C56B;
   --warn-soft: #2A2110;
   --warn-border: #4A3A14;
+  --star: #F5C56B;
   --toast-ok: #15803D;
   --toast-danger: #C2273D;
 
@@ -1879,6 +1881,75 @@ html, body { overscroll-behavior-y: contain; }
 #ptr.ready { color: var(--on-primary); background: linear-gradient(135deg, var(--grad-1), var(--grad-2)); border-color: transparent; }
 #ptr.busy { opacity: 1 !important; transform: translate(-50%, 56px) !important; }
 #ptr.busy svg { animation: spin .9s linear infinite; }
+
+/* ================= reflections (Feature A) ================= */
+.stars { display: inline-flex; gap: 1px; vertical-align: middle; }
+.stars .star { width: 14px; height: 14px; color: var(--star); }
+.stars .star:not(.on) { color: var(--ink-4, var(--ink-3)); opacity: .45; }
+
+.reflectext {
+  display: block;
+  font-style: italic;
+  color: var(--ink-2);
+  font-size: 13.5px;
+  margin-top: 3px;
+  line-height: 1.4;
+}
+
+.revbadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  vertical-align: middle;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--danger-soft-ink);
+  background: var(--danger-soft);
+  border-radius: var(--radius-pill);
+  padding: 1px 8px 1px 6px;
+  white-space: nowrap;
+}
+.revbadge svg { width: 12px; height: 12px; }
+
+/* star picker in the reflection sheet */
+.starpick { display: flex; gap: 6px; }
+.starbtn {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: none;
+  background: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--star);
+}
+.starbtn svg { width: 30px; height: 30px; }
+.starbtn:not(.on) { color: var(--border-strong); }
+.starbtn:active { background: var(--surface-2); }
+
+.checkrow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  font-size: 14.5px;
+  color: var(--ink);
+}
+.checkrow input { width: 20px; height: 20px; flex: none; accent-color: var(--primary); }
+
+/* reflections feed */
+.reflectchips { margin: 0 0 12px; }
+.reflectrow { align-items: stretch; }
+.reflecthead {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.reflectdate { font-size: 12.5px; font-weight: 600; color: var(--ink-3); }
+.reflectrow .reflectext { margin-top: 6px; }
 
 /* ================= reduced motion ================= */
 @media (prefers-reduced-motion: reduce) {

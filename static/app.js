@@ -112,12 +112,30 @@ const ICONS = {
   moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/>',
   monitor: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>',
   rescan: '<path d="M21 12a9 9 0 1 1-2.6-6.3L21 8"/><path d="M21 3v5h-5"/>',
+  star: '<path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>',
+  timer: '<line x1="10" y1="2" x2="14" y2="2"/><line x1="12" y1="14" x2="15" y2="11"/><circle cx="12" cy="14" r="8"/>',
+  shuffle: '<path d="M2 18h1.4c1.3 0 2.5-.7 3.2-1.8l6.8-10.4c.7-1.1 1.9-1.8 3.2-1.8H22"/><path d="m18 2 4 4-4 4"/><path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/><path d="M14.5 15.8c.7 1.3 2.1 2.2 3.6 2.2H22"/><path d="m18 14 4 4-4 4"/>',
+  hand: '<path d="M18 11V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2"/><path d="M14 10V4a2 2 0 0 0-2-2 2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/>',
 };
 
 function icon(name, cls) {
   return `<svg class="${cls || ""}" viewBox="0 0 24 24" fill="none" stroke="currentColor" ` +
     `stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">` +
     `${ICONS[name] || ICONS.file}</svg>`;
+}
+
+/* ---- star ratings (Feature A): filled vs outline, inline SVG only ---- */
+function starSVG(filled) {
+  return `<svg class="star${filled ? " on" : ""}" viewBox="0 0 24 24" ` +
+    `fill="${filled ? "currentColor" : "none"}" stroke="currentColor" ` +
+    `stroke-width="1.6" stroke-linejoin="round" aria-hidden="true">${ICONS.star}</svg>`;
+}
+
+function starsHTML(rating) {
+  const r = rating || 0;
+  let s = "";
+  for (let i = 1; i <= 5; i++) s += starSVG(i <= r);
+  return `<span class="stars" aria-label="${r ? r + " out of 5 stars" : "no rating"}">${s}</span>`;
 }
 
 const IMAGE_RE = /\.(jpe?g|png|gif|webp|svg|bmp|heic)$/i;
@@ -547,6 +565,85 @@ async function deleteUsage(mid, index) {
   return replaceMaterial(out.lesson);
 }
 
+/* Feature A: write the reflection trio onto an existing usage entry. */
+async function saveReflection(mid, index, fields) {
+  const out = await api("/api/lessons/" + encodeURIComponent(mid) +
+    "/usage/update", { method: "POST", body: formBody({
+      index,
+      rating: fields.rating == null ? "" : fields.rating,
+      reflection: fields.reflection || "",
+      needs_revision: fields.needs_revision ? "true" : "false",
+    }) });
+  return replaceMaterial(out.lesson);
+}
+
+// Lightweight reflection sheet. Resolves {rating, reflection, needs_revision}
+// on Save, or null on Skip / dismiss.
+function openReflectDialog(material, preset) {
+  const dlg = $("#reflectdlg");
+  if (!openDialog(dlg)) return Promise.resolve(null);
+  preset = preset || {};
+  $("#rf-heading").textContent = preset.editing ? "Edit reflection" : "Quick reflection";
+  $("#rf-mat").textContent = material.title;
+  let rating = preset.rating || 0;
+  const starsEl = $("#rf-stars");
+  function paintStars() {
+    starsEl.innerHTML = [1, 2, 3, 4, 5].map(i =>
+      `<button type="button" class="starbtn${i <= rating ? " on" : ""}"
+               data-star="${i}" role="radio" aria-checked="${i === rating}"
+               aria-label="${i} star${i === 1 ? "" : "s"}">${starSVG(i <= rating)}</button>`).join("");
+  }
+  paintStars();
+  $("#rf-note").value = preset.reflection || "";
+  $("#rf-revision").checked = !!preset.needs_revision;
+  $("#rf-skip").textContent = preset.editing ? "Cancel" : "Skip";
+  return new Promise(resolve => {
+    const form = $("#rf-form"), skip = $("#rf-skip");
+    function onStars(e) {
+      const b = e.target.closest("[data-star]");
+      if (!b) return;
+      const v = +b.dataset.star;
+      rating = v === rating ? 0 : v;  // tap the same star again to clear
+      paintStars();
+    }
+    function finish(val) {
+      starsEl.removeEventListener("click", onStars);
+      form.removeEventListener("submit", onSubmit);
+      skip.removeEventListener("click", onSkip);
+      dlg.removeEventListener("cancel", onEsc);
+      if (dlg.open) dlg.close();
+      resolve(val);
+    }
+    function onSubmit(e) {
+      e.preventDefault();
+      finish({ rating: rating || null,
+               reflection: $("#rf-note").value.trim(),
+               needs_revision: $("#rf-revision").checked });
+    }
+    function onSkip() { finish(null); }
+    function onEsc(e) { e.preventDefault(); finish(null); }
+    starsEl.addEventListener("click", onStars);
+    form.addEventListener("submit", onSubmit);
+    skip.addEventListener("click", onSkip);
+    dlg.addEventListener("cancel", onEsc);
+  });
+}
+
+// Open the reflection sheet for a material's usage entry, then persist.
+async function reflectOnEntry(material, index, preset) {
+  const fresh = DB.lessons.find(x => x.id === material.id) || material;
+  const fields = await openReflectDialog(fresh, preset);
+  if (!fields) return false;
+  try {
+    await saveReflection(material.id, index, fields);
+    toast("Reflection saved");
+    return true;
+  } catch (err) {
+    toast("Could not save reflection: " + err.message, "error");
+    return false;
+  }
+}
+
 function openUsageDialog(material, preset) {
   const dlg = $("#usagedlg");
   if (!openDialog(dlg)) return Promise.resolve(null);
@@ -755,6 +852,7 @@ function route() {
   const h = location.hash || "#/";
   if (h === "#/add") return { view: "add" };
   if (h === "#/plans") return { view: "plans" };
+  if (h === "#/reflections") return { view: "reflections" };
   if (h === "#/inbox") return { view: "inbox" };
   if (h === "#/settings") return { view: "settings" };
   if (h === "#/health") return { view: "health" };
@@ -776,7 +874,8 @@ function route() {
 const NAV_GROUP = {
   list: "library", lesson: "library", add: "library", edit: "library",
   repair: "library", plans: "plans", plan: "plans", pick: "plans",
-  run: "plans", inbox: "inbox", health: "settings", settings: "settings",
+  run: "plans", reflections: "reflections", inbox: "inbox",
+  health: "settings", settings: "settings",
 };
 
 function updateInboxBadge() {
@@ -815,6 +914,7 @@ function render() {
     else if (r.view === "plan") renderPlan(r.id);
     else if (r.view === "pick") renderPick(r.id);
     else if (r.view === "run") renderRun(r.id);
+    else if (r.view === "reflections") renderReflections();
     else if (r.view === "inbox") renderInbox();
     else if (r.view === "settings") renderSettings();
     else if (r.view === "health") renderHealth();
@@ -1458,6 +1558,27 @@ function renderNeeds() {
 }
 
 // ---- detail view ----
+// A teaching-log row, with the Feature-A reflection: stars, italic note,
+// and a red "Needs revision" badge. `i` is the entry's index in m.usage.
+function usageRowHTML(u, i) {
+  const decorated = u.rating || u.reflection || u.needs_revision;
+  return `<div class="filerow usagerow">
+    <span class="ftile ft-use">${icon("circlecheck")}</span>
+    <span class="fcol">
+      <span class="fname">${esc(fmtDate(u.date))}${u.group ? ` — ${esc(u.group)}` : ""}${
+        u.rating ? " " + starsHTML(u.rating) : ""}${
+        u.needs_revision ? ` <span class="revbadge">${icon("alert")}Needs revision</span>` : ""}</span>
+      ${u.note ? `<span class="fnotetext">${esc(u.note)}</span>` : ""}
+      ${u.reflection ? `<span class="reflectext">${esc(u.reflection)}</span>` : ""}
+    </span>
+    <button type="button" class="fsharebtn iconbtn" data-reflect="${i}"
+            aria-label="${decorated ? "Edit" : "Add"} reflection"
+            title="${decorated ? "Edit reflection" : "Add reflection"}">${icon("star")}</button>
+    <button type="button" class="fsharebtn iconbtn" data-unlog="${i}"
+            aria-label="Remove this log entry" title="Remove entry">${icon("x")}</button>
+  </div>`;
+}
+
 function renderDetail(id) {
   const m = DB.lessons.find(x => x.id === id);
   if (!m) {
@@ -1550,16 +1671,9 @@ function renderDetail(id) {
       ${usage.length ? `
         <h3 class="section-title">${icon("history")}Teaching log (${usage.length})</h3>
         <div class="filelist" id="usagelist">
-          ${usage.map((u, i) => `
-            <div class="filerow usagerow">
-              <span class="ftile ft-use">${icon("circlecheck")}</span>
-              <span class="fcol">
-                <span class="fname">${esc(fmtDate(u.date))}${u.group ? ` — ${esc(u.group)}` : ""}</span>
-                ${u.note ? `<span class="fnotetext">${esc(u.note)}</span>` : ""}
-              </span>
-              <button type="button" class="fsharebtn iconbtn" data-unlog="${i}"
-                      aria-label="Remove this log entry" title="Remove entry">${icon("x")}</button>
-            </div>`).join("")}
+          ${usage.map((u, i) => ({ u, i }))
+            .sort((a, b) => (b.u.date || "").localeCompare(a.u.date || ""))
+            .map(({ u, i }) => usageRowHTML(u, i)).join("")}
         </div>` : ""}
       <div class="detail-actions">
         <a class="btn primary" href="#/edit/${encodeURIComponent(m.id)}">${icon("pencil")}<span>Edit</span></a>
@@ -1768,6 +1882,17 @@ function renderDetail(id) {
       }
       return;
     }
+    const reflect = e.target.closest("[data-reflect]");
+    if (reflect) {
+      const i = +reflect.dataset.reflect;
+      const u = (m.usage || [])[i];
+      if (!u) return;
+      const ok = await reflectOnEntry(m, i, {
+        editing: true, rating: u.rating || 0,
+        reflection: u.reflection || "", needs_revision: !!u.needs_revision });
+      if (ok) renderDetail(m.id);
+      return;
+    }
     const unlog = e.target.closest("[data-unlog]");
     if (unlog) {
       try {
@@ -1939,9 +2064,12 @@ async function setPlanItemDone(p, i, done, mats) {
   const planNote = "Plan: " + p.title;
   try {
     if (done) {
-      await postUsage(m.id, { date: todayISO(), group: p.group || "",
-                              note: planNote });
-      toast(`Done — logged in the teaching log of “${m.title}”`);
+      const rec = await postUsage(m.id, { date: todayISO(),
+                                          group: p.group || "", note: planNote });
+      const idx = (rec.usage || []).length - 1;
+      toast(`Done — logged in “${m.title}”`, "ok", { actions: [
+        { label: "Reflect", onClick: () => reflectOnEntry(rec, idx) },
+      ] });
     } else {
       const fresh = DB.lessons.find(x => x.id === m.id);
       const idx = (fresh.usage || []).map((u, j) => [u, j])
@@ -2651,6 +2779,77 @@ function renderInbox() {
   }
 }
 
+// ---- reflections feed (Feature A) ----
+let reflectFilter = "all";   // "all" | "needs" | "low"
+
+async function renderReflections() {
+  view.innerHTML = `<h2 class="pagetitle">Reflections</h2>
+    <div class="skel row"></div><div class="skel row"></div>`;
+  let feed;
+  try {
+    feed = (await api("/api/reflections")).reflections || [];
+  } catch (err) {
+    view.innerHTML = `<h2 class="pagetitle">Reflections</h2>
+      <p class="empty">Could not load reflections: ${esc(err.message)}</p>`;
+    return;
+  }
+  if (route().view !== "reflections") return;  // navigated away meanwhile
+
+  const counts = {
+    all: feed.length,
+    needs: feed.filter(r => r.needs_revision).length,
+    low: feed.filter(r => r.rating && r.rating <= 2).length,
+  };
+  const CHIPS = [["all", "All"], ["needs", "Needs revision"], ["low", "1★–2★"]];
+
+  function shown() {
+    if (reflectFilter === "needs") return feed.filter(r => r.needs_revision);
+    if (reflectFilter === "low") return feed.filter(r => r.rating && r.rating <= 2);
+    return feed;
+  }
+
+  function rowHTML(r) {
+    return `<a class="card reflectrow" href="#/lesson/${encodeURIComponent(r.material_id)}">
+      <div class="card-body">
+        <div class="reflecthead">
+          <span class="reflectdate">${esc(fmtDate(r.date))}</span>
+          ${r.rating ? starsHTML(r.rating) : ""}
+          ${r.needs_revision ? `<span class="revbadge">${icon("alert")}Needs revision</span>` : ""}
+        </div>
+        <div class="card-title">${esc(r.material_name)}</div>
+        ${r.group ? `<div class="card-foot"><span>${icon("users")}${esc(r.group)}</span></div>` : ""}
+        ${r.reflection ? `<div class="reflectext">${esc(r.reflection)}</div>` : ""}
+      </div>
+      ${icon("chevron", "card-chev")}
+    </a>`;
+  }
+
+  function paint() {
+    const rows = shown();
+    view.innerHTML = `
+      <h2 class="pagetitle">Reflections</h2>
+      <p class="hint pagehint">How your materials went in class — tap one to open it.</p>
+      <div class="chips reflectchips" id="reflectchips">
+        ${CHIPS.map(([k, label]) => `<button type="button"
+          class="chip${reflectFilter === k ? " on" : ""}" data-rf="${k}"
+          aria-pressed="${reflectFilter === k}"><span>${label}</span>
+          <span class="fcount">${counts[k]}</span></button>`).join("")}
+      </div>
+      ${rows.length ? `<div class="results">${rows.map(rowHTML).join("")}</div>`
+        : `<div class="emptystate">${emptyArt()}<h3>Nothing here yet</h3>
+            <p>${reflectFilter === "all"
+              ? "Rate and reflect after a class: in class mode tap Done then Reflect, or use the ★ on any teaching-log entry."
+              : "No entries match this filter."}</p></div>`}`;
+    $("#reflectchips").addEventListener("click", e => {
+      const c = e.target.closest("[data-rf]");
+      if (!c || c.dataset.rf === reflectFilter) return;
+      reflectFilter = c.dataset.rf;
+      paint();
+    });
+  }
+  paint();
+}
+
 // ---- health view ----
 async function renderHealth() {
   view.innerHTML = `<h2 class="pagetitle">Library health</h2>
@@ -2703,6 +2902,20 @@ async function renderHealth() {
           they'll wait here until you attach them.</p>`}
     </div>
 
+    ${h.needs_revision ? `
+    <div class="formcard">
+      <h3>${icon("star")}Reflections</h3>
+      <a class="filerow" href="#/reflections" id="needsrevstat">
+        <span class="ftile ft-use">${icon("alert")}</span>
+        <span class="fcol">
+          <span class="fname">${h.needs_revision} material${h.needs_revision === 1 ? "" : "s"}
+            need${h.needs_revision === 1 ? "s" : ""} revision</span>
+          <span class="fnotetext">Flagged in a teaching-log reflection</span>
+        </span>
+        ${icon("chevron", "card-chev")}
+      </a>
+    </div>` : ""}
+
     <div class="formcard">
       <h3>${icon("tags")}Tagging gaps</h3>
       ${(h.untagged || []).length ? `
@@ -2731,6 +2944,9 @@ async function renderHealth() {
           ${icon("trash")}<span>Empty Trash permanently</span></button>`
       : `<p class="hint">Trash is empty.</p>`}
     </div>`;
+
+  const nrs = $("#needsrevstat");
+  if (nrs) nrs.addEventListener("click", () => { reflectFilter = "needs"; });
 
   const emptyBtn = $("#emptytrash");
   if (emptyBtn) {

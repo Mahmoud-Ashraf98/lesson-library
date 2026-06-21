@@ -443,6 +443,121 @@ class TestUsageLog(LibraryTestCase):
                          [{"date": "2026-01-05", "group": "ok", "note": ""}])
 
 
+class TestReflections(LibraryTestCase):
+    """Feature A: the reflection trio on usage entries and the feed."""
+
+    def test_normalize_accepts_reflection_trio(self):
+        usage = server.normalize_usage([
+            {"date": "2026-06-01", "rating": 4,
+             "reflection": "  Paced too fast.  ", "needs_revision": True}])
+        self.assertEqual(usage, [{
+            "date": "2026-06-01", "group": "", "note": "",
+            "rating": 4, "reflection": "Paced too fast.",
+            "needs_revision": True}])
+
+    def test_normalize_rejects_out_of_range_rating(self):
+        for bad in (0, 6, -1, "x", 4.5, None):
+            usage = server.normalize_usage([{"date": "2026-06-01",
+                                             "rating": bad}])
+            self.assertNotIn("rating", usage[0], msg=repr(bad))
+        # in-range values are kept
+        usage = server.normalize_usage([{"date": "2026-06-01", "rating": "5"}])
+        self.assertEqual(usage[0]["rating"], 5)
+
+    def test_normalize_empty_reflection_is_unset(self):
+        usage = server.normalize_usage([{"date": "2026-06-01",
+                                         "reflection": "   "}])
+        self.assertNotIn("reflection", usage[0])
+
+    def test_normalize_needs_revision_defaults_false_and_omitted(self):
+        usage = server.normalize_usage([{"date": "2026-06-01"}])
+        self.assertNotIn("needs_revision", usage[0])
+        usage = server.normalize_usage([{"date": "2026-06-01",
+                                         "needs_revision": False}])
+        self.assertNotIn("needs_revision", usage[0])
+        usage = server.normalize_usage([{"date": "2026-06-01",
+                                         "needs_revision": 1}])
+        self.assertTrue(usage[0]["needs_revision"])
+
+    def test_v1_usage_without_reflection_still_loads(self):
+        self.write_folder("kit", meta={
+            "title": "Kit",
+            "usage": [{"date": "2026-01-05", "group": "ok", "note": "n"}]})
+        server.rebuild_index()
+        rec = server.STATE["lessons"]["kit"]
+        self.assertEqual(rec["usage"],
+                         [{"date": "2026-01-05", "group": "ok", "note": "n"}])
+
+    def test_log_usage_persists_reflection_fields(self):
+        rec = self.create_material().get_json()["lesson"]
+        out = self.client.post(
+            "/api/lessons/" + rec["id"] + "/usage",
+            data={"date": "2026-06-12", "rating": "4",
+                  "reflection": "Needs more CCQs", "needs_revision": "true"},
+            content_type="multipart/form-data").get_json()["lesson"]
+        entry = out["usage"][0]
+        self.assertEqual(entry["rating"], 4)
+        self.assertEqual(entry["reflection"], "Needs more CCQs")
+        self.assertTrue(entry["needs_revision"])
+        self.assertEqual(self.disk_json(rec["id"])["usage"], out["usage"])
+
+    def test_update_usage_edits_and_clears_reflection(self):
+        rec = self.create_material().get_json()["lesson"]
+        self.client.post("/api/lessons/" + rec["id"] + "/usage",
+                         data={"date": "2026-06-12"},
+                         content_type="multipart/form-data")
+        out = self.client.post(
+            "/api/lessons/" + rec["id"] + "/usage/update",
+            data={"index": "0", "rating": "5", "reflection": "Great",
+                  "needs_revision": "true"},
+            content_type="multipart/form-data").get_json()["lesson"]
+        self.assertEqual(out["usage"][0]["rating"], 5)
+        # clearing: empty reflection + falsey flag remove the keys
+        out = self.client.post(
+            "/api/lessons/" + rec["id"] + "/usage/update",
+            data={"index": "0", "reflection": "", "needs_revision": "false"},
+            content_type="multipart/form-data").get_json()["lesson"]
+        self.assertNotIn("reflection", out["usage"][0])
+        self.assertNotIn("needs_revision", out["usage"][0])
+        self.assertEqual(out["usage"][0]["rating"], 5)
+
+    def test_reflections_feed_only_includes_reflective_entries(self):
+        rec = self.create_material().get_json()["lesson"]
+        # plain use -> excluded
+        self.client.post("/api/lessons/" + rec["id"] + "/usage",
+                         data={"date": "2026-06-01"},
+                         content_type="multipart/form-data")
+        # rated use -> included
+        self.client.post("/api/lessons/" + rec["id"] + "/usage",
+                         data={"date": "2026-06-02", "rating": "2"},
+                         content_type="multipart/form-data")
+        feed = self.client.get("/api/reflections").get_json()["reflections"]
+        self.assertEqual(len(feed), 1)
+        self.assertEqual(feed[0]["material_id"], rec["id"])
+        self.assertEqual(feed[0]["rating"], 2)
+
+    def test_reflections_feed_needs_revision_filter(self):
+        rec = self.create_material().get_json()["lesson"]
+        self.client.post("/api/lessons/" + rec["id"] + "/usage",
+                         data={"date": "2026-06-02", "rating": "5"},
+                         content_type="multipart/form-data")
+        self.client.post("/api/lessons/" + rec["id"] + "/usage",
+                         data={"date": "2026-06-03", "needs_revision": "true"},
+                         content_type="multipart/form-data")
+        flagged = self.client.get(
+            "/api/reflections?needs_revision=true").get_json()["reflections"]
+        self.assertEqual(len(flagged), 1)
+        self.assertTrue(flagged[0]["needs_revision"])
+
+    def test_health_counts_materials_needing_revision(self):
+        rec = self.create_material().get_json()["lesson"]
+        self.client.post("/api/lessons/" + rec["id"] + "/usage",
+                         data={"date": "2026-06-03", "needs_revision": "true"},
+                         content_type="multipart/form-data")
+        h = self.client.get("/api/health").get_json()
+        self.assertEqual(h["needs_revision"], 1)
+
+
 class TestPlans(LibraryTestCase):
     def make_plan(self, **over):
         data = {"title": "Tuesday B2", "group": "B2 evening",

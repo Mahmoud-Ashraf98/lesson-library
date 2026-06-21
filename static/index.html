@@ -39,6 +39,10 @@
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/><path d="m9 16 2 2 4-4"/></svg>
     <span>Classes</span>
   </a>
+  <a href="#/reflections" data-nav="reflections">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+    <span>Reflect</span>
+  </a>
   <a href="#/inbox" data-nav="inbox">
     <span class="navicon">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
@@ -100,6 +104,27 @@
     <div class="dlg-actions">
       <button type="button" id="ud-cancel" class="btn">Cancel</button>
       <button type="submit" id="ud-save" class="btn primary">Log use</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="reflectdlg" class="dlg formdlg">
+  <h2 id="rf-heading">Quick reflection</h2>
+  <p id="rf-mat" class="dlg-sub"></p>
+  <form id="rf-form">
+    <div class="field"><span>How did it go?</span>
+      <div id="rf-stars" class="starpick" role="radiogroup" aria-label="Rating from 1 to 5 stars"></div>
+    </div>
+    <label class="field"><span>Reflection</span>
+      <textarea id="rf-note" rows="2" placeholder="How did it go? What to change next time?"></textarea>
+    </label>
+    <label class="checkrow">
+      <input type="checkbox" id="rf-revision">
+      <span>Needs revision before next use</span>
+    </label>
+    <div class="dlg-actions">
+      <button type="button" id="rf-skip" class="btn">Skip</button>
+      <button type="submit" id="rf-save" class="btn primary">Save</button>
     </div>
   </form>
 </dialog>

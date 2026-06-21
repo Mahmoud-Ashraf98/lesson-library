@@ -132,9 +132,31 @@ def as_list(value):
 _ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def form_bool(value):
+    """Tolerant truthiness for form/query string values."""
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def normalize_rating(value):
+    """A reflection rating is an integer 1–5; anything else means 'no rating'
+    so it is dropped (the key is omitted rather than stored as null)."""
+    if isinstance(value, bool):  # a stray bool is not a star rating
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None  # 4.5 is not a star rating, don't truncate it to 4
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if 1 <= n <= 5 else None
+
+
 def normalize_usage(value):
-    """Teaching log entries: [{date: YYYY-MM-DD, group, note}]. Entries with
-    a malformed date are dropped; everything else is kept as written."""
+    """Teaching log entries: [{date: YYYY-MM-DD, group, note}] plus the
+    optional reflection trio {rating, reflection, needs_revision}. Entries
+    with a malformed date are dropped; everything else is kept as written.
+    Reflection keys are OMITTED when empty so v1 logs never gain spurious
+    nulls until the teacher actually reflects (lazy migration)."""
     out = []
     if not isinstance(value, list):
         return out
@@ -144,9 +166,18 @@ def normalize_usage(value):
         date = clean_line(entry.get("date"))[:10]
         if not _ISO_DAY.match(date):
             continue
-        out.append({"date": date,
-                    "group": clean_line(entry.get("group")),
-                    "note": clean_line(entry.get("note"))})
+        norm = {"date": date,
+                "group": clean_line(entry.get("group")),
+                "note": clean_line(entry.get("note"))}
+        rating = normalize_rating(entry.get("rating"))
+        if rating is not None:
+            norm["rating"] = rating
+        reflection = clean_line(entry.get("reflection"))
+        if reflection:
+            norm["reflection"] = reflection
+        if entry.get("needs_revision"):
+            norm["needs_revision"] = True
+        out.append(norm)
     return out
 
 
@@ -1113,12 +1144,96 @@ def api_log_usage(lid):
     entry = {"date": date,
              "group": clean_line(request.form.get("group")),
              "note": clean_line(request.form.get("note"))}
+    # Optional reflection captured in the same submit (run mode "Reflect").
+    rating = normalize_rating(request.form.get("rating"))
+    if rating is not None:
+        entry["rating"] = rating
+    reflection = clean_line(request.form.get("reflection"))
+    if reflection:
+        entry["reflection"] = reflection
+    if form_bool(request.form.get("needs_revision")):
+        entry["needs_revision"] = True
     rec = dict(rec, usage=list(rec.get("usage") or []) + [entry])
     write_lesson_json(folder, disk_record(rec))
     with LOCK:
         STATE["lessons"][folder.name] = rec
     log(f"logged use of {folder.name!r} on {date}")
     return jsonify(lesson=rec)
+
+
+@app.post("/api/lessons/<lid>/usage/update")
+def api_update_usage(lid):
+    """Add or edit the reflection on an existing teaching-log entry. Only the
+    posted reflection fields change; a present-but-empty field clears that key
+    so the sidecar never carries empty reflections."""
+    folder = resolve_lesson_dir(lid)
+    if folder is None:
+        abort(404)
+    with LOCK:
+        rec = STATE["lessons"].get(folder.name)
+    if rec is None:
+        abort(404)
+    try:
+        index = int(request.form.get("index", ""))
+    except ValueError:
+        return jsonify(error="index is required."), 400
+    usage = [dict(u) for u in (rec.get("usage") or [])]
+    if not 0 <= index < len(usage):
+        return jsonify(error="No such log entry."), 400
+    entry = usage[index]
+    if "rating" in request.form:
+        rating = normalize_rating(request.form.get("rating"))
+        if rating is None:
+            entry.pop("rating", None)
+        else:
+            entry["rating"] = rating
+    if "reflection" in request.form:
+        reflection = clean_line(request.form.get("reflection"))
+        if reflection:
+            entry["reflection"] = reflection
+        else:
+            entry.pop("reflection", None)
+    if "needs_revision" in request.form:
+        if form_bool(request.form.get("needs_revision")):
+            entry["needs_revision"] = True
+        else:
+            entry.pop("needs_revision", None)
+    rec = dict(rec, usage=usage)
+    write_lesson_json(folder, disk_record(rec))
+    with LOCK:
+        STATE["lessons"][folder.name] = rec
+    log(f"updated reflection on {folder.name!r} entry {index}")
+    return jsonify(lesson=rec)
+
+
+@app.get("/api/reflections")
+def api_reflections():
+    """Reverse-chronological feed of every teaching-log entry that carries a
+    reflection, a rating, or a needs-revision flag. ?needs_revision=true keeps
+    only the flagged ones."""
+    only_revision = form_bool(request.args.get("needs_revision"))
+    with LOCK:
+        lessons = list(STATE["lessons"].values())
+    out = []
+    for rec in lessons:
+        for u in rec.get("usage") or []:
+            needs = bool(u.get("needs_revision"))
+            if not (u.get("reflection") or u.get("rating") is not None or needs):
+                continue
+            if only_revision and not needs:
+                continue
+            out.append({
+                "material_id": rec["id"],
+                "material_name": rec["title"],
+                "date": u["date"],
+                "group": u.get("group", ""),
+                "rating": u.get("rating"),
+                "reflection": u.get("reflection", ""),
+                "needs_revision": needs,
+            })
+    out.sort(key=lambda r: (r["date"], r["material_name"].lower()),
+             reverse=True)
+    return jsonify(reflections=out)
 
 
 @app.post("/api/lessons/<lid>/usage/delete")
@@ -1309,9 +1424,13 @@ def api_health():
                             .isoformat(timespec="seconds") if mtime else ""),
             })
     inbox = list_inbox_files()
+    needs_revision = sum(
+        1 for r in lessons
+        if any(u.get("needs_revision") for u in (r.get("usage") or [])))
     return jsonify(
         materials=len(lessons),
         needs_attention=len(needs),
+        needs_revision=needs_revision,
         plans=len(plans),
         files=total_files,
         bytes=total_bytes,
