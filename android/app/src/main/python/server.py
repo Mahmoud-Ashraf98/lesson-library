@@ -217,6 +217,29 @@ def taxonomy_options(field):
     return [o for g in TAXONOMY.get(field, []) for o in g["options"]]
 
 
+# Curated per-file roles (Feature D). A flat list in taxonomy.json under
+# "file_roles"; custom roles the teacher types are merged in at payload time.
+_DEFAULT_FILE_ROLES = ["Student handout", "Teacher notes", "Answer key",
+                       "Audio", "Slides", "Cards", "Other"]
+
+
+def load_file_roles():
+    try:
+        raw = json.loads(TAXONOMY_PATH.read_text(encoding="utf-8"))
+        roles = raw.get("file_roles")
+        if isinstance(roles, list):
+            cleaned = [clean_line(r) for r in roles
+                       if isinstance(r, str) and r.strip()]
+            if cleaned:
+                return cleaned
+    except Exception:
+        pass
+    return list(_DEFAULT_FILE_ROLES)
+
+
+FILE_ROLES = load_file_roles()
+
+
 # ---- v1 level migration --------------------------------------------------------
 # v1 had one "level" field mixing CEFR bands with exam names. Schema v2 keeps
 # them independent; these are the known legacy spellings.
@@ -291,25 +314,41 @@ def normalize_record(material_id, raw, files):
     else:
         cefr, exams = split_legacy_level(raw.get("level"))
 
-    notes = {}
+    notes, roles, transcripts = {}, {}, {}
     order = []
     raw_files = raw.get("files")
     if isinstance(raw_files, list):
         for entry in raw_files:
             if isinstance(entry, dict) and entry.get("name"):
-                notes[str(entry["name"])] = clean_line(entry.get("note"))
-                order.append(str(entry["name"]))
+                name = str(entry["name"])
+                notes[name] = clean_line(entry.get("note"))
+                role = clean_line(entry.get("role"))
+                if role:
+                    roles[name] = role
+                # transcripts may be multi-line (speaker turns); trim ends only
+                transcript = str(entry.get("transcript") or "").strip()
+                if transcript:
+                    transcripts[name] = transcript
+                order.append(name)
 
     # the directory listing is the truth for which files exist; the sidecar's
-    # order is honoured, and notes ride along by exact name
+    # order is honoured, and notes/role/transcript ride along by exact name
     ordered = order_files(files, order)
+
+    def file_obj(f):
+        o = {"name": f["name"], "size": f["size"],
+             "note": notes.get(f["name"], "")}
+        if f["name"] in roles:
+            o["role"] = roles[f["name"]]
+        if f["name"] in transcripts:
+            o["transcript"] = transcripts[f["name"]]
+        return o
 
     return {
         "schema_version": SCHEMA_VERSION,
         "id": material_id,
         "title": clean_line(raw.get("title")),
-        "files": [{"name": f["name"], "size": f["size"],
-                   "note": notes.get(f["name"], "")} for f in ordered],
+        "files": [file_obj(f) for f in ordered],
         "age_groups": multi(values_for("age_groups", "age_group"),
                             AGE_GROUPS),
         "cefr_levels": multi(cefr, CEFR_LEVELS),
@@ -379,24 +418,75 @@ def plan_from_form(plan_id, form):
     return normalize_plan(plan_id, raw)
 
 
-def record_from_form(material_id, form, files, file_notes=None):
+def record_from_form(material_id, form, files, file_meta=None):
+    """file_meta maps a file name to its stored note (a plain string) or to a
+    {note?, role?, transcript?} dict — so create/edit can carry roles too."""
     raw = {k: form.get(k, "") for k in ("title", "duration_min", "notes")}
     for field in ("age_groups", "cefr_levels", "exam_targets", "skills",
                   "grammar_points", "vocab_focuses", "topics", "themes",
                   "formats"):
         raw[field] = form.getlist(field)
-    if file_notes:
-        raw["files"] = [{"name": n, "note": note}
-                        for n, note in file_notes.items()]
+    if file_meta:
+        entries = []
+        for n, meta in file_meta.items():
+            if isinstance(meta, dict):
+                entries.append(dict(meta, name=n))
+            else:
+                entries.append({"name": n, "note": meta})
+        raw["files"] = entries
     return normalize_record(material_id, raw, files)
 
 
+def disk_file(f):
+    """lesson.json file entry: name + note, plus role/transcript when set
+    (omitted otherwise so v1 sidecars never grow empty keys)."""
+    o = {"name": f["name"], "note": f.get("note", "")}
+    if f.get("role"):
+        o["role"] = f["role"]
+    if f.get("transcript"):
+        o["transcript"] = f["transcript"]
+    return o
+
+
 def disk_record(rec):
-    """lesson.json shape: same fields, files as {name, note} — size is
-    omitted because the directory remains the source of truth."""
+    """lesson.json shape: same fields, files as {name, note[, role,
+    transcript]} — size is omitted because the directory is the source of
+    truth."""
     d = dict(rec)
-    d["files"] = [{"name": f["name"], "note": f["note"]} for f in rec["files"]]
+    d["files"] = [disk_file(f) for f in rec["files"]]
     return d
+
+
+def attach_file_meta(files, rec_files, new_meta=None):
+    """Attach stored note/role/transcript to `files` IN THE GIVEN ORDER (used
+    by reorder, which has already computed the order). new_meta overrides per
+    file by name."""
+    new_meta = new_meta or {}
+    by_name = {f["name"]: f for f in rec_files}
+    out = []
+    for f in files:
+        prev = by_name.get(f["name"], {})
+        nm = new_meta.get(f["name"], {})
+        o = {"name": f["name"], "size": f["size"],
+             "note": nm.get("note", prev.get("note", ""))}
+        role = nm.get("role", prev.get("role", ""))
+        if role:
+            o["role"] = role
+        transcript = nm.get("transcript", prev.get("transcript", ""))
+        if transcript:
+            o["transcript"] = transcript
+        out.append(o)
+    return out
+
+
+def merge_file_meta(disk_files, rec_files, new_meta=None):
+    """Re-attach stored note/role/transcript to a fresh directory listing,
+    honouring the record's file order. new_meta (name -> {note?, role?,
+    transcript?}) overrides per file — used when an upload/import carries its
+    own note or role. Files absent from rec_files (just added) keep only what
+    new_meta gives them."""
+    ordered = order_files(disk_files, [f["name"] for f in rec_files])
+    return attach_file_meta(ordered, rec_files, new_meta)
 
 
 def stored_file_notes(folder):
@@ -414,6 +504,29 @@ def stored_file_notes(folder):
             if isinstance(entry, dict) and entry.get("name"):
                 notes[str(entry["name"])] = clean_line(entry.get("note"))
     return notes
+
+
+def stored_file_meta(folder):
+    """{file name: {role?, transcript?}} from the folder's lesson.json — used
+    to carry per-file roles through a metadata edit, which never posts them."""
+    try:
+        raw = json.loads((folder / "lesson.json")
+                         .read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+    meta = {}
+    if isinstance(raw, dict) and isinstance(raw.get("files"), list):
+        for entry in raw["files"]:
+            if isinstance(entry, dict) and entry.get("name"):
+                m = {}
+                role = clean_line(entry.get("role"))
+                if role:
+                    m["role"] = role
+                transcript = str(entry.get("transcript") or "").strip()
+                if transcript:
+                    m["transcript"] = transcript
+                meta[str(entry["name"])] = m
+    return meta
 
 
 def parse_notes_list(value):
@@ -580,14 +693,21 @@ def save_uploads(folder, uploads):
 
 
 def receive_uploads(folder):
-    """Save this request's uploads and pair file_notes with them by form
-    order, keyed by the final saved name."""
+    """Save this request's uploads and pair file_notes and (optional)
+    file_roles with them by form order, keyed by the final saved name.
+    Returns (saved, new_meta) where new_meta maps name -> {note, role?}."""
     uploads = [f for f in request.files.getlist("files") if f and f.filename]
     notes_list = parse_notes_list(request.form.get("file_notes"))
+    roles_list = parse_notes_list(request.form.get("file_roles"))
     saved = save_uploads(folder, uploads)
-    new_notes = {s["name"]: (notes_list[i] if i < len(notes_list) else "")
-                 for i, s in enumerate(saved)}
-    return saved, new_notes
+    new_meta = {}
+    for i, s in enumerate(saved):
+        m = {"note": notes_list[i] if i < len(notes_list) else ""}
+        role = roles_list[i] if i < len(roles_list) else ""
+        if role:
+            m["role"] = role
+        new_meta[s["name"]] = m
+    return saved, new_meta
 
 
 # ---- inbox -------------------------------------------------------------------
@@ -765,6 +885,22 @@ def library_customs(records, field, catalog):
                   key=str.lower)
 
 
+def library_custom_roles(records):
+    """File roles used in the library but missing from FILE_ROLES, deduped
+    case-insensitively keeping the most frequent casing (Feature D), mirroring
+    library_customs for the facet comboboxes."""
+    catalog_lower = {r.lower() for r in FILE_ROLES}
+    casings = {}
+    for rec in records:
+        for f in rec.get("files") or []:
+            role = f.get("role")
+            if not role or role.lower() in catalog_lower:
+                continue
+            casings.setdefault(role.lower(), Counter())[role] += 1
+    return sorted((c.most_common(1)[0][0] for c in casings.values()),
+                  key=str.lower)
+
+
 def index_payload():
     with LOCK:
         lessons = list(STATE["lessons"].values())
@@ -783,6 +919,10 @@ def index_payload():
         groups = ([{"group": "Your library", "options": customs}]
                   if customs else [])
         taxonomy[field] = groups + catalog_groups
+    custom_roles = library_custom_roles(lessons)
+    file_roles = (([{"group": "Your library", "options": custom_roles}]
+                   if custom_roles else [])
+                  + [{"group": "Roles", "options": FILE_ROLES}])
     return {
         # "lessons" is a legacy payload key; the records are materials
         "lessons": lessons,
@@ -793,6 +933,7 @@ def index_payload():
         "options": {"age_groups": AGE_GROUPS, "cefr_levels": CEFR_LEVELS,
                     "skills": SKILLS, "formats": FORMATS},
         "taxonomy": taxonomy,
+        "file_roles": file_roles,
     }
 
 
@@ -848,10 +989,11 @@ def api_create():
     folder.mkdir(parents=True)
     # Crash-safe ordering: folder, then files, then lesson.json as the
     # commit marker — a half-finished add surfaces as "needs attention".
-    _, new_notes = receive_uploads(folder)
-    new_notes.update(take_inbox_files(folder))
+    _, new_meta = receive_uploads(folder)
+    for name, note in take_inbox_files(folder).items():
+        new_meta[name] = {"note": note}
     rec = record_from_form(slug, request.form, list_kit_files(folder),
-                           new_notes)
+                           new_meta)
     rec["date_added"] = now_iso()
     write_lesson_json(folder, disk_record(rec))
     with LOCK:
@@ -875,6 +1017,14 @@ def api_update(lid):
     file_notes.update(take_inbox_files(folder))
     rec = record_from_form(folder.name, request.form,
                            list_kit_files(folder), file_notes)
+    # role/transcript aren't part of the edit form; carry them over by name
+    saved_meta = stored_file_meta(folder)
+    for f in rec["files"]:
+        m = saved_meta.get(f["name"], {})
+        if m.get("role"):
+            f["role"] = m["role"]
+        if m.get("transcript"):
+            f["transcript"] = m["transcript"]
     with LOCK:
         prev = STATE["lessons"].get(folder.name)
         broken = STATE["needs"].get(folder.name)
@@ -898,15 +1048,12 @@ def api_add_files(lid):
     folder = resolve_lesson_dir(lid)
     if folder is None:
         abort(404)
-    saved, new_notes = receive_uploads(folder)
+    saved, new_meta = receive_uploads(folder)
     files = list_kit_files(folder)
     with LOCK:
         rec = STATE["lessons"].get(folder.name)
     if rec is not None:
-        merged = {f["name"]: f.get("note", "") for f in rec["files"]}
-        merged.update(new_notes)
-        files = order_files(files, [f["name"] for f in rec["files"]])
-        files = [dict(f, note=merged.get(f["name"], "")) for f in files]
+        files = merge_file_meta(files, rec["files"], new_meta)
         rec = dict(rec, id=folder.name, files=files)
         write_lesson_json(folder, disk_record(rec))
         with LOCK:
@@ -933,10 +1080,8 @@ def api_attach_inbox(lid):
     with LOCK:
         rec = STATE["lessons"].get(folder.name)
     if rec is not None:
-        merged = {f["name"]: f.get("note", "") for f in rec["files"]}
-        merged.update(taken)
-        files = order_files(files, [f["name"] for f in rec["files"]])
-        files = [dict(f, note=merged.get(f["name"], "")) for f in files]
+        new_meta = {name: {"note": note} for name, note in taken.items()}
+        files = merge_file_meta(files, rec["files"], new_meta)
         rec = dict(rec, id=folder.name, files=files)
         write_lesson_json(folder, disk_record(rec))
         with LOCK:
@@ -996,9 +1141,7 @@ def api_files_to_inbox(lid):
     with LOCK:
         rec = STATE["lessons"].get(folder.name)
     if rec is not None:
-        notes = {f["name"]: f.get("note", "") for f in rec["files"]}
-        files = order_files(files, [f["name"] for f in rec["files"]])
-        files = [dict(f, note=notes.get(f["name"], "")) for f in files]
+        files = merge_file_meta(files, rec["files"])
         rec = dict(rec, id=folder.name, files=files)
         write_lesson_json(folder, disk_record(rec))
         with LOCK:
@@ -1032,6 +1175,11 @@ def api_edit_file(lid):
     # a missing note field means "keep the current note"; an empty one clears it
     set_note = "note" in request.form
     note = clean_line(request.form.get("note"))
+    # role/transcript follow the same "present field updates, empty clears" rule
+    set_role = "role" in request.form
+    role = clean_line(request.form.get("role"))
+    set_transcript = "transcript" in request.form
+    transcript = str(request.form.get("transcript") or "").strip()
     renamed = new != old
     if renamed:
         if new.lower() in {n.lower() for n in valid if n != old}:
@@ -1050,14 +1198,33 @@ def api_edit_file(lid):
         rec = STATE["lessons"].get(folder.name)
     files = list_kit_files(folder)
     if rec is not None:
-        notes = {f["name"]: f.get("note", "") for f in rec["files"]}
+        by = {f["name"]: dict(f) for f in rec["files"]}
         order = [new if n == old else n for n in (f["name"] for f in rec["files"])]
-        kept = notes.get(old, "")
-        notes.pop(old, None)
-        notes[new] = note if set_note else kept
+        entry = by.pop(old, {})  # the edited file's stored meta, moved to `new`
+        if set_note:
+            entry["note"] = note
+        if set_role:
+            if role:
+                entry["role"] = role
+            else:
+                entry.pop("role", None)
+        if set_transcript:
+            if transcript:
+                entry["transcript"] = transcript
+            else:
+                entry.pop("transcript", None)
+        by[new] = entry
         files = order_files(files, order)
-        files = [dict(f, note=notes.get(f["name"], "")) for f in files]
-        rec = dict(rec, id=folder.name, files=files)
+        out = []
+        for f in files:
+            m = by.get(f["name"], {})
+            o = {"name": f["name"], "size": f["size"], "note": m.get("note", "")}
+            if m.get("role"):
+                o["role"] = m["role"]
+            if m.get("transcript"):
+                o["transcript"] = m["transcript"]
+            out.append(o)
+        rec = dict(rec, id=folder.name, files=out)
         write_lesson_json(folder, disk_record(rec))
         with LOCK:
             STATE["lessons"][folder.name] = rec
@@ -1097,8 +1264,7 @@ def api_reorder_files(lid):
     with LOCK:
         rec = STATE["lessons"].get(folder.name)
     if rec is not None:
-        notes = {f["name"]: f.get("note", "") for f in rec["files"]}
-        files = [dict(f, note=notes.get(f["name"], "")) for f in files]
+        files = attach_file_meta(files, rec["files"])  # keep the new order
         rec = dict(rec, id=folder.name, files=files)
         write_lesson_json(folder, disk_record(rec))
         with LOCK:

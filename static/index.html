@@ -135,8 +135,14 @@
     <label class="field"><span>File name</span>
       <input type="text" id="fe-name" autocomplete="off" spellcheck="false" placeholder="e.g. Unit 4 — reading.pdf">
     </label>
+    <label class="field"><span>Role</span>
+      <input type="text" id="fe-role" autocomplete="off" list="rolesdl" placeholder="e.g. Answer key">
+    </label>
     <label class="field"><span>Note</span>
-      <input type="text" id="fe-note" autocomplete="off" placeholder="e.g. Student handout">
+      <input type="text" id="fe-note" autocomplete="off" placeholder="e.g. Print one per pair">
+    </label>
+    <label class="field" id="fe-transcript-field"><span>Transcript</span>
+      <textarea id="fe-transcript" rows="3" placeholder="Type or paste the audio transcript…"></textarea>
     </label>
     <div class="dlg-actions fe-actions">
       <button type="button" id="fe-remove" class="btn danger">Remove from material</button>
@@ -196,6 +202,7 @@
 </dialog>
 
 <datalist id="groupsdl"></datalist>
+<datalist id="rolesdl"></datalist>
 
 <noscript><p class="empty">This app needs JavaScript enabled.</p></noscript>
 <script src="/static/app.js"></script>

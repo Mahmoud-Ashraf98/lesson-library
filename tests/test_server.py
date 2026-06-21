@@ -650,6 +650,122 @@ class TestPlans(LibraryTestCase):
         self.assertEqual(again["items"], out["items"])
 
 
+class TestFileRoles(LibraryTestCase):
+    """Feature D: per-file role + transcript on files[]."""
+
+    def test_normalize_accepts_role_and_transcript(self):
+        raw = {"title": "t", "files": [
+            {"name": "a.pdf", "note": "n", "role": "Answer key"},
+            {"name": "b.mp3", "role": "Audio", "transcript": "  Hello.  "}]}
+        files = [{"name": "a.pdf", "size": 1}, {"name": "b.mp3", "size": 2}]
+        rec = server.normalize_record("x", raw, files)
+        by = {f["name"]: f for f in rec["files"]}
+        self.assertEqual(by["a.pdf"]["role"], "Answer key")
+        self.assertEqual(by["b.mp3"]["role"], "Audio")
+        self.assertEqual(by["b.mp3"]["transcript"], "Hello.")
+
+    def test_v1_files_have_no_role_keys(self):
+        rec = server.normalize_record(
+            "x", {"title": "t", "files": [{"name": "a.pdf", "note": "n"}]},
+            [{"name": "a.pdf", "size": 1}])
+        self.assertNotIn("role", rec["files"][0])
+        self.assertNotIn("transcript", rec["files"][0])
+        # blank role/transcript are dropped, not stored as keys
+        rec = server.normalize_record(
+            "x", {"title": "t",
+                  "files": [{"name": "a.pdf", "role": "  ", "transcript": ""}]},
+            [{"name": "a.pdf", "size": 1}])
+        self.assertNotIn("role", rec["files"][0])
+        self.assertNotIn("transcript", rec["files"][0])
+
+    def test_payload_includes_curated_file_roles(self):
+        payload = self.client.get("/api/lessons").get_json()
+        flat = [o for g in payload["file_roles"] for o in g["options"]]
+        self.assertIn("Student handout", flat)
+        self.assertIn("Answer key", flat)
+        self.assertIn("Audio", flat)
+
+    def test_upload_with_role_persists(self):
+        resp = self.create_material(
+            files=[(io.BytesIO(b"k"), "answer-key.pdf")],
+            file_roles=json.dumps(["Answer key"]))
+        rec = resp.get_json()["lesson"]
+        self.assertEqual(rec["files"][0]["role"], "Answer key")
+        disk = {f["name"]: f for f in self.disk_json(rec["id"])["files"]}
+        self.assertEqual(disk["answer-key.pdf"]["role"], "Answer key")
+
+    def test_edit_file_sets_role_and_transcript(self):
+        rec = self.create_material(
+            files=[(io.BytesIO(b"a"), "a.mp3")]).get_json()["lesson"]
+        out = self.client.post(
+            "/api/lessons/" + rec["id"] + "/files/edit",
+            data={"old": "a.mp3", "name": "a.mp3", "role": "Audio",
+                  "transcript": "Speaker 1: Hi."},
+            content_type="multipart/form-data").get_json()["lesson"]
+        self.assertEqual(out["files"][0]["role"], "Audio")
+        self.assertEqual(out["files"][0]["transcript"], "Speaker 1: Hi.")
+        # clearing the role removes the key
+        out = self.client.post(
+            "/api/lessons/" + rec["id"] + "/files/edit",
+            data={"old": "a.mp3", "name": "a.mp3", "role": ""},
+            content_type="multipart/form-data").get_json()["lesson"]
+        self.assertNotIn("role", out["files"][0])
+        self.assertEqual(out["files"][0]["transcript"], "Speaker 1: Hi.")
+
+    def test_role_survives_rename_and_metadata_edit(self):
+        rec = self.create_material(
+            files=[(io.BytesIO(b"a"), "a.pdf")]).get_json()["lesson"]
+        self.client.post("/api/lessons/" + rec["id"] + "/files/edit",
+                         data={"old": "a.pdf", "name": "a.pdf",
+                               "role": "Student handout"},
+                         content_type="multipart/form-data")
+        # rename keeps the role
+        out = self.client.post(
+            "/api/lessons/" + rec["id"] + "/files/edit",
+            data={"old": "a.pdf", "name": "handout.pdf"},
+            content_type="multipart/form-data").get_json()["lesson"]
+        self.assertEqual(out["files"][0]["role"], "Student handout")
+        # editing the material's metadata (no role posted) keeps the role
+        out = self.client.post(
+            "/api/lessons/" + rec["id"],
+            data={"title": "Renamed", "skills": ["Reading"]},
+            content_type="multipart/form-data").get_json()["lesson"]
+        self.assertEqual(out["files"][0]["role"], "Student handout")
+        self.assertEqual(self.disk_json(rec["id"])["files"][0]["role"],
+                         "Student handout")
+
+    def test_role_survives_add_files_and_reorder(self):
+        rec = self.create_material(
+            files=[(io.BytesIO(b"a"), "a.pdf")]).get_json()["lesson"]
+        self.client.post("/api/lessons/" + rec["id"] + "/files/edit",
+                         data={"old": "a.pdf", "name": "a.pdf",
+                               "role": "Answer key"},
+                         content_type="multipart/form-data")
+        self.client.post(
+            "/api/lessons/" + rec["id"] + "/files",
+            data={"files": [(io.BytesIO(b"b"), "b.pdf")]},
+            content_type="multipart/form-data")
+        out = self.client.post(
+            "/api/lessons/" + rec["id"] + "/files/reorder",
+            data={"order": json.dumps(["b.pdf", "a.pdf"])},
+            content_type="multipart/form-data").get_json()["lesson"]
+        self.assertEqual([f["name"] for f in out["files"]], ["b.pdf", "a.pdf"])
+        roles = {f["name"]: f.get("role") for f in out["files"]}
+        self.assertEqual(roles["a.pdf"], "Answer key")
+        self.assertIsNone(roles["b.pdf"])
+
+    def test_custom_role_preserved_and_in_catalog(self):
+        rec = self.create_material(
+            files=[(io.BytesIO(b"a"), "a.pdf")]).get_json()["lesson"]
+        self.client.post("/api/lessons/" + rec["id"] + "/files/edit",
+                         data={"old": "a.pdf", "name": "a.pdf",
+                               "role": "Realia photo"},
+                         content_type="multipart/form-data")
+        payload = self.client.get("/api/lessons").get_json()
+        self.assertEqual(payload["file_roles"][0]["group"], "Your library")
+        self.assertIn("Realia photo", payload["file_roles"][0]["options"])
+
+
 class TestInbox(LibraryTestCase):
     def stage(self, name, content=b"x"):
         (server.INBOX_DIR / name).write_bytes(content)

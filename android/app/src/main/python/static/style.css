@@ -1951,6 +1951,68 @@ html, body { overscroll-behavior-y: contain; }
 .reflectdate { font-size: 12.5px; font-weight: 600; color: var(--ink-3); }
 .reflectrow .reflectext { margin-top: 6px; }
 
+/* ================= per-file roles (Feature D) ================= */
+.frole {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  margin-top: 2px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--primary-soft-ink);
+  background: var(--primary-soft);
+  border-radius: var(--radius-pill);
+  padding: 1px 9px 1px 6px;
+}
+.frole svg { width: 12px; height: 12px; }
+.filecard .frole { margin: 4px auto 0; }
+
+.filerowwrap { display: flex; flex-direction: column; }
+.ftranscript {
+  margin: -2px 0 2px 56px;
+  font-size: 13px;
+}
+.ftranscript summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  color: var(--ink-3);
+  font-weight: 600;
+  padding: 4px 0;
+  min-height: 32px;
+  list-style: none;
+}
+.ftranscript summary::-webkit-details-marker { display: none; }
+.ftranscript summary svg { width: 14px; height: 14px; }
+.ftranscripttext {
+  white-space: pre-wrap;
+  color: var(--ink-2);
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  line-height: 1.45;
+}
+
+.keytoggle.on { color: var(--primary-soft-ink); background: var(--primary-soft); }
+.keyshint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--ink-3);
+  margin: 0 0 8px;
+}
+.keyshint svg { width: 14px; height: 14px; }
+
+/* role + note inputs on the Quick-Add picked-file rows */
+.frowmeta { display: flex; gap: 8px; }
+.frowmeta .frole-in { flex: 0 0 42%; }
+.frowmeta .fnote { flex: 1; }
+#fe-transcript-field[hidden] { display: none; }
+
 /* ================= reduced motion ================= */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

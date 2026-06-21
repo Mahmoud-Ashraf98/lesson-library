@@ -44,6 +44,7 @@ function lsSet(k, v) {
 let filtersOpen = true;        // filter panel on the list view (session only)
 let listLayout = lsGet("mlib-list-layout") === "grid" ? "grid" : "list";
 let fileLayout = lsGet("mlib-file-layout") === "grid" ? "grid" : "list";
+let hideKeys = lsGet("mlib-hide-keys") === "1";   // hide answer-key files (Feature D)
 
 const view = document.getElementById("view");
 const $ = (s, el = document) => el.querySelector(s);
@@ -139,6 +140,24 @@ function starsHTML(rating) {
 }
 
 const IMAGE_RE = /\.(jpe?g|png|gif|webp|svg|bmp|heic)$/i;
+const AUDIO_RE = /\.(mp3|wav|ogg|m4a|flac|aac)$/i;
+
+/* ---- per-file component roles (Feature D) ---- */
+const ROLE_ICONS = {
+  "student handout": "filetext", "teacher notes": "pencil",
+  "answer key": "circlecheck", "audio": "music", "slides": "slides",
+  "cards": "sheet", "other": "file",
+};
+function roleIcon(role) {
+  return ROLE_ICONS[String(role || "").toLowerCase()] || "tags";
+}
+function isAnswerKey(f) {
+  return String(f.role || "").toLowerCase() === "answer key";
+}
+function isAudioRole(f) {
+  return String(f.role || "").toLowerCase() === "audio" || AUDIO_RE.test(f.name);
+}
+
 const FILE_KINDS = [
   [/\.(pdf|docx?|txt|rtf|odt|md)$/i, "filetext", ""],
   [/\.(pptx?|odp|key)$/i, "slides", ""],
@@ -385,6 +404,16 @@ function fillGroupsDatalist() {
   $("#groupsdl").innerHTML = [...groups].sort((a, b) =>
     a.toLowerCase().localeCompare(b.toLowerCase()))
     .map(g => `<option value="${esc(g)}">`).join("");
+}
+
+function fillRolesDatalist() {
+  const el = $("#rolesdl");
+  if (!el) return;
+  const roles = [];
+  for (const g of (DB && DB.file_roles) || []) {
+    for (const o of g.options || []) roles.push(o);
+  }
+  el.innerHTML = roles.map(r => `<option value="${esc(r)}">`).join("");
 }
 
 async function api(url, opts) {
@@ -683,8 +712,14 @@ function openFileEditDialog(file) {
     if (name == null) return Promise.resolve(null);
     return Promise.resolve({ name: name.trim() || file.name, note: file.note || "" });
   }
+  fillRolesDatalist();
   $("#fe-name").value = file.name;
   $("#fe-note").value = file.note || "";
+  $("#fe-role").value = file.role || "";
+  $("#fe-transcript").value = file.transcript || "";
+  // the transcript field only makes sense for audio (or anything already
+  // carrying one) — keep the dialog tidy for documents
+  $("#fe-transcript-field").hidden = !(isAudioRole(file) || file.transcript);
   const nameEl = $("#fe-name");
   nameEl.focus();
   // place the caret before the extension so the readable part is easiest to fix
@@ -692,10 +727,17 @@ function openFileEditDialog(file) {
   try { nameEl.setSelectionRange(0, dot > 0 ? dot : file.name.length); } catch (e) { /* type=text only */ }
   return new Promise(resolve => {
     const form = $("#fe-form"), cancel = $("#fe-cancel"), remove = $("#fe-remove");
+    const roleEl = $("#fe-role");
+    function syncTranscript() {
+      $("#fe-transcript-field").hidden =
+        !(String(roleEl.value).toLowerCase() === "audio"
+          || AUDIO_RE.test(file.name) || $("#fe-transcript").value.trim());
+    }
     function finish(val) {
       form.removeEventListener("submit", onSubmit);
       cancel.removeEventListener("click", onCancel);
       remove.removeEventListener("click", onRemove);
+      roleEl.removeEventListener("input", syncTranscript);
       dlg.removeEventListener("cancel", onEsc);
       if (dlg.open) dlg.close();
       resolve(val);
@@ -704,8 +746,11 @@ function openFileEditDialog(file) {
       e.preventDefault();
       const name = $("#fe-name").value.trim();
       if (!name) { $("#fe-name").focus(); return; }
-      finish({ name: name, note: $("#fe-note").value.trim() });
+      finish({ name: name, note: $("#fe-note").value.trim(),
+               role: $("#fe-role").value.trim(),
+               transcript: $("#fe-transcript").value.trim() });
     }
+    roleEl.addEventListener("input", syncTranscript);
     function onCancel() { finish(null); }
     function onRemove() { finish({ remove: true }); }
     function onEsc(e) { e.preventDefault(); finish(null); }
@@ -1096,7 +1141,8 @@ function searchHay(m) {
           ...(m.exam_targets || []), ...(m.skills || []),
           ...(m.formats || []),
           ...ARRAY_SEARCH_FIELDS.flatMap(f => m[f] || []),
-          ...(m.files || []).map(f => f.name + "\n" + (f.note || ""))]
+          ...(m.files || []).map(f => [f.name, f.note || "", f.role || "",
+                                       f.transcript || ""].join("\n"))]
     .join("\n").toLowerCase();
 }
 
@@ -1663,6 +1709,10 @@ function renderDetail(id) {
                     aria-pressed="${fileLayout === "grid"}" aria-label="Grid view"
                     title="Grid view">${icon("grid")}</button>
           </div>
+          ${(m.files || []).some(isAnswerKey) ? `<button type="button" id="hidekeysbtn"
+            class="iconbtn keytoggle ${hideKeys ? "on" : ""}" aria-pressed="${hideKeys}"
+            aria-label="${hideKeys ? "Show" : "Hide"} answer keys"
+            title="${hideKeys ? "Show" : "Hide"} answer keys">${icon("circlecheck")}</button>` : ""}
           ${m.files.length > 1 ? `<button type="button" id="reorderbtn"
             class="iconbtn reordertoggle" aria-pressed="false"
             aria-label="Reorder files" title="Reorder files">${icon("grip")}</button>` : ""}
@@ -1687,6 +1737,7 @@ function renderDetail(id) {
       ${fileTileHTML(f.name, m.id)}
       <span class="fcol">
         <span class="fname">${esc(f.name)}</span>
+        ${f.role ? `<span class="frole">${icon(roleIcon(f.role))}${esc(f.role)}</span>` : ""}
         ${f.note ? `<span class="fnotetext">${esc(f.note)}</span>` : ""}
       </span>
       <span class="fsize">${fmtSize(f.size)}</span>`;
@@ -1694,11 +1745,16 @@ function renderDetail(id) {
       ? `<button type="button" class="fmain" data-img="${esc(f.name)}">${inner}</button>`
       : `<a class="fmain" target="_blank" rel="noopener"
             href="${fileURL(m.id, f.name)}">${inner}</a>`;
-    return `<div class="filerow">${main}
-      <button type="button" class="fsharebtn iconbtn" data-edit="${esc(f.name)}"
-              aria-label="Rename or note ${esc(f.name)}" title="Rename / note">${icon("pencil")}</button>
-      <button type="button" class="fsharebtn iconbtn" data-share="${esc(f.name)}"
-              aria-label="Share ${esc(f.name)}" title="Share">${icon("share")}</button>
+    return `<div class="filerowwrap">
+      <div class="filerow">${main}
+        <button type="button" class="fsharebtn iconbtn" data-edit="${esc(f.name)}"
+                aria-label="Edit ${esc(f.name)}" title="Rename / role / note">${icon("pencil")}</button>
+        <button type="button" class="fsharebtn iconbtn" data-share="${esc(f.name)}"
+                aria-label="Share ${esc(f.name)}" title="Share">${icon("share")}</button>
+      </div>
+      ${f.transcript ? `<details class="ftranscript">
+        <summary>${icon("music")}<span>Transcript</span></summary>
+        <div class="ftranscripttext">${esc(f.transcript)}</div></details>` : ""}
     </div>`;
   }
 
@@ -1723,7 +1779,8 @@ function renderDetail(id) {
     const ext = fileExtLabel(f.name);
     const inner = `${thumb}
       ${ext ? `<span class="ftype">${esc(ext)}</span>` : ""}
-      <span class="fname">${esc(f.name)}</span>`;
+      <span class="fname">${esc(f.name)}</span>
+      ${f.role ? `<span class="frole">${icon(roleIcon(f.role))}${esc(f.role)}</span>` : ""}`;
     const main = isImg
       ? `<button type="button" class="fcmain" data-img="${esc(f.name)}">${inner}</button>`
       : `<a class="fcmain" target="_blank" rel="noopener"
@@ -1752,14 +1809,18 @@ function renderDetail(id) {
            fileReorderRowHTML(f, i, all.length)).join("")}</div>`;
       return;
     }
-    const files = (m.files || []).filter(f =>
+    let files = (m.files || []).filter(f =>
       kindSel === "all" || fileKind(f.name) === kindSel);
+    const hidden = hideKeys ? files.filter(isAnswerKey).length : 0;
+    if (hideKeys) files = files.filter(f => !isAnswerKey(f));
+    const hint = hidden ? `<p class="keyshint">${icon("circlecheck")}${hidden}
+      answer key${hidden === 1 ? "" : "s"} hidden</p>` : "";
     if (!files.length) {
-      wrap.innerHTML = `<p class="empty">No matching files.</p>`;
+      wrap.innerHTML = hint + `<p class="empty">No matching files.</p>`;
     } else if (fileLayout === "grid") {
-      wrap.innerHTML = `<div class="filegrid">${files.map(fileCardHTML).join("")}</div>`;
+      wrap.innerHTML = hint + `<div class="filegrid">${files.map(fileCardHTML).join("")}</div>`;
     } else {
-      wrap.innerHTML = `<div class="filelist">${files.map(fileRowHTML).join("")}</div>`;
+      wrap.innerHTML = hint + `<div class="filelist">${files.map(fileRowHTML).join("")}</div>`;
     }
   }
   renderFiles();
@@ -1836,6 +1897,18 @@ function renderDetail(id) {
       renderFiles();
     });
   }
+  const hideKeysBtn = $("#hidekeysbtn");
+  if (hideKeysBtn) {
+    hideKeysBtn.addEventListener("click", () => {
+      hideKeys = !hideKeys;
+      lsSet("mlib-hide-keys", hideKeys ? "1" : "0");
+      hideKeysBtn.classList.toggle("on", hideKeys);
+      hideKeysBtn.setAttribute("aria-pressed", hideKeys);
+      hideKeysBtn.title = (hideKeys ? "Show" : "Hide") + " answer keys";
+      hideKeysBtn.setAttribute("aria-label", hideKeysBtn.title);
+      renderFiles();
+    });
+  }
   const reorderBtn = $("#reorderbtn");
   if (reorderBtn) {
     reorderBtn.addEventListener("click", () => {
@@ -1872,11 +1945,14 @@ function renderDetail(id) {
       if (!res) return;
       if (res.remove) { await removeFile(file); return; }
       try {
+        const body = { old: file.name, name: res.name, note: res.note };
+        if (res.role !== undefined) body.role = res.role;
+        if (res.transcript !== undefined) body.transcript = res.transcript;
         const out = await api("/api/lessons/" + encodeURIComponent(m.id) + "/files/edit",
-          { method: "POST", body: formBody({ old: file.name, name: res.name, note: res.note }) });
+          { method: "POST", body: formBody(body) });
         if (out.lesson) replaceMaterial(out.lesson);
         renderDetail(m.id);
-        toast(out.old === out.new ? "Note saved" : "Renamed to " + out.new);
+        toast(out.old === out.new ? "File updated" : "Renamed to " + out.new);
       } catch (err) {
         toast("Could not save: " + err.message, "error");
       }
@@ -2432,10 +2508,14 @@ function renderRun(id) {
         ${m.files.length ? `<span>${icon("file")}${m.files.length} file${m.files.length === 1 ? "" : "s"}</span>` : ""}
       </div>
       ${m.notes ? `<div class="notecallout"><span class="notelabel">Notes</span>${esc(m.notes)}</div>` : ""}
-      ${m.files.length ? `<div class="runfiles">${m.files.slice(0, 6).map(f => `
-        <a class="chip" target="_blank" rel="noopener" href="${fileURL(m.id, f.name)}">
-          ${icon("external", "chip-ic-plus")}<span>${esc(f.name)}</span></a>`).join("")}
-      </div>` : ""}`
+      ${(() => {
+        // in class the teacher projects this; honor "Hide answer keys"
+        const rf = (m.files || []).filter(f => !(hideKeys && isAnswerKey(f)));
+        return rf.length ? `<div class="runfiles">${rf.slice(0, 6).map(f => `
+          <a class="chip" target="_blank" rel="noopener" href="${fileURL(m.id, f.name)}">
+            ${icon(f.role ? roleIcon(f.role) : "external", "chip-ic-plus")}<span>${esc(f.name)}</span></a>`).join("")}
+        </div>` : "";
+      })()}`
     : `
       <span class="runtile">${icon("alert")}</span>
       <h2>${esc(it.material_id)}</h2>
@@ -3398,15 +3478,19 @@ function renderForm({ view: mode, id }) {
           <button type="button" class="fremove" data-i="${i}"
                   aria-label="Remove ${esc(p.file.name)}">${icon("x")}</button>
         </div>
-        <input type="text" class="fnote" data-i="${i}"
-               placeholder="Optional note — e.g. Student handout"
-               value="${esc(p.note)}">
+        <div class="frowmeta">
+          <input type="text" class="frole-in" data-i="${i}" list="rolesdl"
+                 placeholder="Role — e.g. Answer key" value="${esc(p.role || "")}">
+          <input type="text" class="fnote" data-i="${i}"
+                 placeholder="Optional note" value="${esc(p.note)}">
+        </div>
       </div>`).join("");
     updateAttMeta();
   }
   updateAttMeta();
+  fillRolesDatalist();
   filepick.addEventListener("change", () => {
-    for (const f of filepick.files) pickedFiles.push({ file: f, note: "" });
+    for (const f of filepick.files) pickedFiles.push({ file: f, note: "", role: "" });
     filepick.value = "";
     renderPicked();
     applyImportSuggestions();
@@ -3421,7 +3505,9 @@ function renderForm({ view: mode, id }) {
   });
   $("#filerows").addEventListener("input", e => {
     const note = e.target.closest(".fnote");
-    if (note) pickedFiles[+note.dataset.i].note = note.value;
+    if (note) { pickedFiles[+note.dataset.i].note = note.value; return; }
+    const role = e.target.closest(".frole-in");
+    if (role) pickedFiles[+role.dataset.i].role = role.value;
   });
 
   if (mode === "edit" || mode === "repair") refreshSuggestions();
@@ -3553,6 +3639,7 @@ function renderForm({ view: mode, id }) {
       if (mode === "add") {
         pickedFiles.forEach(p => fd.append("files", p.file));
         fd.append("file_notes", JSON.stringify(pickedFiles.map(p => p.note)));
+        fd.append("file_roles", JSON.stringify(pickedFiles.map(p => p.role || "")));
         const out = await upload("/api/lessons", fd, onProgress);
         materialId = out.lesson.id;
       } else {
@@ -3560,6 +3647,7 @@ function renderForm({ view: mode, id }) {
           const ff = new FormData();
           pickedFiles.forEach(p => ff.append("files", p.file));
           ff.append("file_notes", JSON.stringify(pickedFiles.map(p => p.note)));
+          ff.append("file_roles", JSON.stringify(pickedFiles.map(p => p.role || "")));
           await upload("/api/lessons/" + encodeURIComponent(id) + "/files",
                        ff, onProgress);
           btn.textContent = "Saving…";
