@@ -34,6 +34,7 @@ import socket
 import sys
 import threading
 import unicodedata
+import zipfile
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -132,9 +133,31 @@ def as_list(value):
 _ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def form_bool(value):
+    """Tolerant truthiness for form/query string values."""
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def normalize_rating(value):
+    """A reflection rating is an integer 1–5; anything else means 'no rating'
+    so it is dropped (the key is omitted rather than stored as null)."""
+    if isinstance(value, bool):  # a stray bool is not a star rating
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None  # 4.5 is not a star rating, don't truncate it to 4
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if 1 <= n <= 5 else None
+
+
 def normalize_usage(value):
-    """Teaching log entries: [{date: YYYY-MM-DD, group, note}]. Entries with
-    a malformed date are dropped; everything else is kept as written."""
+    """Teaching log entries: [{date: YYYY-MM-DD, group, note}] plus the
+    optional reflection trio {rating, reflection, needs_revision}. Entries
+    with a malformed date are dropped; everything else is kept as written.
+    Reflection keys are OMITTED when empty so v1 logs never gain spurious
+    nulls until the teacher actually reflects (lazy migration)."""
     out = []
     if not isinstance(value, list):
         return out
@@ -144,9 +167,18 @@ def normalize_usage(value):
         date = clean_line(entry.get("date"))[:10]
         if not _ISO_DAY.match(date):
             continue
-        out.append({"date": date,
-                    "group": clean_line(entry.get("group")),
-                    "note": clean_line(entry.get("note"))})
+        norm = {"date": date,
+                "group": clean_line(entry.get("group")),
+                "note": clean_line(entry.get("note"))}
+        rating = normalize_rating(entry.get("rating"))
+        if rating is not None:
+            norm["rating"] = rating
+        reflection = clean_line(entry.get("reflection"))
+        if reflection:
+            norm["reflection"] = reflection
+        if entry.get("needs_revision"):
+            norm["needs_revision"] = True
+        out.append(norm)
     return out
 
 
@@ -184,6 +216,29 @@ except Exception as exc:  # keep the library usable even if the catalog breaks
 
 def taxonomy_options(field):
     return [o for g in TAXONOMY.get(field, []) for o in g["options"]]
+
+
+# Curated per-file roles (Feature D). A flat list in taxonomy.json under
+# "file_roles"; custom roles the teacher types are merged in at payload time.
+_DEFAULT_FILE_ROLES = ["Student handout", "Teacher notes", "Answer key",
+                       "Audio", "Slides", "Cards", "Other"]
+
+
+def load_file_roles():
+    try:
+        raw = json.loads(TAXONOMY_PATH.read_text(encoding="utf-8"))
+        roles = raw.get("file_roles")
+        if isinstance(roles, list):
+            cleaned = [clean_line(r) for r in roles
+                       if isinstance(r, str) and r.strip()]
+            if cleaned:
+                return cleaned
+    except Exception:
+        pass
+    return list(_DEFAULT_FILE_ROLES)
+
+
+FILE_ROLES = load_file_roles()
 
 
 # ---- v1 level migration --------------------------------------------------------
@@ -260,25 +315,41 @@ def normalize_record(material_id, raw, files):
     else:
         cefr, exams = split_legacy_level(raw.get("level"))
 
-    notes = {}
+    notes, roles, transcripts = {}, {}, {}
     order = []
     raw_files = raw.get("files")
     if isinstance(raw_files, list):
         for entry in raw_files:
             if isinstance(entry, dict) and entry.get("name"):
-                notes[str(entry["name"])] = clean_line(entry.get("note"))
-                order.append(str(entry["name"]))
+                name = str(entry["name"])
+                notes[name] = clean_line(entry.get("note"))
+                role = clean_line(entry.get("role"))
+                if role:
+                    roles[name] = role
+                # transcripts may be multi-line (speaker turns); trim ends only
+                transcript = str(entry.get("transcript") or "").strip()
+                if transcript:
+                    transcripts[name] = transcript
+                order.append(name)
 
     # the directory listing is the truth for which files exist; the sidecar's
-    # order is honoured, and notes ride along by exact name
+    # order is honoured, and notes/role/transcript ride along by exact name
     ordered = order_files(files, order)
+
+    def file_obj(f):
+        o = {"name": f["name"], "size": f["size"],
+             "note": notes.get(f["name"], "")}
+        if f["name"] in roles:
+            o["role"] = roles[f["name"]]
+        if f["name"] in transcripts:
+            o["transcript"] = transcripts[f["name"]]
+        return o
 
     return {
         "schema_version": SCHEMA_VERSION,
         "id": material_id,
         "title": clean_line(raw.get("title")),
-        "files": [{"name": f["name"], "size": f["size"],
-                   "note": notes.get(f["name"], "")} for f in ordered],
+        "files": [file_obj(f) for f in ordered],
         "age_groups": multi(values_for("age_groups", "age_group"),
                             AGE_GROUPS),
         "cefr_levels": multi(cefr, CEFR_LEVELS),
@@ -302,6 +373,22 @@ def normalize_record(material_id, raw, files):
 
 # ---- plan normalization --------------------------------------------------------
 PLAN_SCHEMA_VERSION = 1
+
+
+STAGE_KEYS = ("warmer", "break", "cool-down")
+
+
+def normalize_stage_durations(value):
+    """Optional per-stage default minutes for the run-mode timer (Feature B).
+    Each key optional, integer 1–180; invalid values are dropped, never
+    written, so the client falls back to its 5-minute default."""
+    out = {}
+    if isinstance(value, dict):
+        for key in STAGE_KEYS:
+            n = parse_duration(value.get(key))
+            if n is not None and 1 <= n <= 180:
+                out[key] = n
+    return out
 
 
 def normalize_plan(plan_id, raw):
@@ -334,6 +421,7 @@ def normalize_plan(plan_id, raw):
         "plan_date": clean_line(raw.get("plan_date")),
         "notes": str(raw.get("notes") or "").strip(),
         "items": items,
+        "stage_durations": normalize_stage_durations(raw.get("stage_durations")),
         "date_added": clean_line(raw.get("date_added")),
     }
 
@@ -345,27 +433,82 @@ def plan_from_form(plan_id, form):
         raw["items"] = json.loads(form.get("items") or "[]")
     except ValueError:
         raw["items"] = []
+    try:
+        raw["stage_durations"] = json.loads(form.get("stage_durations") or "{}")
+    except ValueError:
+        raw["stage_durations"] = {}
     return normalize_plan(plan_id, raw)
 
 
-def record_from_form(material_id, form, files, file_notes=None):
+def record_from_form(material_id, form, files, file_meta=None):
+    """file_meta maps a file name to its stored note (a plain string) or to a
+    {note?, role?, transcript?} dict — so create/edit can carry roles too."""
     raw = {k: form.get(k, "") for k in ("title", "duration_min", "notes")}
     for field in ("age_groups", "cefr_levels", "exam_targets", "skills",
                   "grammar_points", "vocab_focuses", "topics", "themes",
                   "formats"):
         raw[field] = form.getlist(field)
-    if file_notes:
-        raw["files"] = [{"name": n, "note": note}
-                        for n, note in file_notes.items()]
+    if file_meta:
+        entries = []
+        for n, meta in file_meta.items():
+            if isinstance(meta, dict):
+                entries.append(dict(meta, name=n))
+            else:
+                entries.append({"name": n, "note": meta})
+        raw["files"] = entries
     return normalize_record(material_id, raw, files)
 
 
+def disk_file(f):
+    """lesson.json file entry: name + note, plus role/transcript when set
+    (omitted otherwise so v1 sidecars never grow empty keys)."""
+    o = {"name": f["name"], "note": f.get("note", "")}
+    if f.get("role"):
+        o["role"] = f["role"]
+    if f.get("transcript"):
+        o["transcript"] = f["transcript"]
+    return o
+
+
 def disk_record(rec):
-    """lesson.json shape: same fields, files as {name, note} — size is
-    omitted because the directory remains the source of truth."""
+    """lesson.json shape: same fields, files as {name, note[, role,
+    transcript]} — size is omitted because the directory is the source of
+    truth."""
     d = dict(rec)
-    d["files"] = [{"name": f["name"], "note": f["note"]} for f in rec["files"]]
+    d["files"] = [disk_file(f) for f in rec["files"]]
     return d
+
+
+def attach_file_meta(files, rec_files, new_meta=None):
+    """Attach stored note/role/transcript to `files` IN THE GIVEN ORDER (used
+    by reorder, which has already computed the order). new_meta overrides per
+    file by name."""
+    new_meta = new_meta or {}
+    by_name = {f["name"]: f for f in rec_files}
+    out = []
+    for f in files:
+        prev = by_name.get(f["name"], {})
+        nm = new_meta.get(f["name"], {})
+        o = {"name": f["name"], "size": f["size"],
+             "note": nm.get("note", prev.get("note", ""))}
+        role = nm.get("role", prev.get("role", ""))
+        if role:
+            o["role"] = role
+        transcript = nm.get("transcript", prev.get("transcript", ""))
+        if transcript:
+            o["transcript"] = transcript
+        out.append(o)
+    return out
+
+
+def merge_file_meta(disk_files, rec_files, new_meta=None):
+    """Re-attach stored note/role/transcript to a fresh directory listing,
+    honouring the record's file order. new_meta (name -> {note?, role?,
+    transcript?}) overrides per file — used when an upload/import carries its
+    own note or role. Files absent from rec_files (just added) keep only what
+    new_meta gives them."""
+    ordered = order_files(disk_files, [f["name"] for f in rec_files])
+    return attach_file_meta(ordered, rec_files, new_meta)
 
 
 def stored_file_notes(folder):
@@ -383,6 +526,29 @@ def stored_file_notes(folder):
             if isinstance(entry, dict) and entry.get("name"):
                 notes[str(entry["name"])] = clean_line(entry.get("note"))
     return notes
+
+
+def stored_file_meta(folder):
+    """{file name: {role?, transcript?}} from the folder's lesson.json — used
+    to carry per-file roles through a metadata edit, which never posts them."""
+    try:
+        raw = json.loads((folder / "lesson.json")
+                         .read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+    meta = {}
+    if isinstance(raw, dict) and isinstance(raw.get("files"), list):
+        for entry in raw["files"]:
+            if isinstance(entry, dict) and entry.get("name"):
+                m = {}
+                role = clean_line(entry.get("role"))
+                if role:
+                    m["role"] = role
+                transcript = str(entry.get("transcript") or "").strip()
+                if transcript:
+                    m["transcript"] = transcript
+                meta[str(entry["name"])] = m
+    return meta
 
 
 def parse_notes_list(value):
@@ -549,14 +715,21 @@ def save_uploads(folder, uploads):
 
 
 def receive_uploads(folder):
-    """Save this request's uploads and pair file_notes with them by form
-    order, keyed by the final saved name."""
+    """Save this request's uploads and pair file_notes and (optional)
+    file_roles with them by form order, keyed by the final saved name.
+    Returns (saved, new_meta) where new_meta maps name -> {note, role?}."""
     uploads = [f for f in request.files.getlist("files") if f and f.filename]
     notes_list = parse_notes_list(request.form.get("file_notes"))
+    roles_list = parse_notes_list(request.form.get("file_roles"))
     saved = save_uploads(folder, uploads)
-    new_notes = {s["name"]: (notes_list[i] if i < len(notes_list) else "")
-                 for i, s in enumerate(saved)}
-    return saved, new_notes
+    new_meta = {}
+    for i, s in enumerate(saved):
+        m = {"note": notes_list[i] if i < len(notes_list) else ""}
+        role = roles_list[i] if i < len(roles_list) else ""
+        if role:
+            m["role"] = role
+        new_meta[s["name"]] = m
+    return saved, new_meta
 
 
 # ---- inbox -------------------------------------------------------------------
@@ -734,6 +907,22 @@ def library_customs(records, field, catalog):
                   key=str.lower)
 
 
+def library_custom_roles(records):
+    """File roles used in the library but missing from FILE_ROLES, deduped
+    case-insensitively keeping the most frequent casing (Feature D), mirroring
+    library_customs for the facet comboboxes."""
+    catalog_lower = {r.lower() for r in FILE_ROLES}
+    casings = {}
+    for rec in records:
+        for f in rec.get("files") or []:
+            role = f.get("role")
+            if not role or role.lower() in catalog_lower:
+                continue
+            casings.setdefault(role.lower(), Counter())[role] += 1
+    return sorted((c.most_common(1)[0][0] for c in casings.values()),
+                  key=str.lower)
+
+
 def index_payload():
     with LOCK:
         lessons = list(STATE["lessons"].values())
@@ -752,6 +941,10 @@ def index_payload():
         groups = ([{"group": "Your library", "options": customs}]
                   if customs else [])
         taxonomy[field] = groups + catalog_groups
+    custom_roles = library_custom_roles(lessons)
+    file_roles = (([{"group": "Your library", "options": custom_roles}]
+                   if custom_roles else [])
+                  + [{"group": "Roles", "options": FILE_ROLES}])
     return {
         # "lessons" is a legacy payload key; the records are materials
         "lessons": lessons,
@@ -762,6 +955,7 @@ def index_payload():
         "options": {"age_groups": AGE_GROUPS, "cefr_levels": CEFR_LEVELS,
                     "skills": SKILLS, "formats": FORMATS},
         "taxonomy": taxonomy,
+        "file_roles": file_roles,
     }
 
 
@@ -817,14 +1011,16 @@ def api_create():
     folder.mkdir(parents=True)
     # Crash-safe ordering: folder, then files, then lesson.json as the
     # commit marker — a half-finished add surfaces as "needs attention".
-    _, new_notes = receive_uploads(folder)
-    new_notes.update(take_inbox_files(folder))
+    _, new_meta = receive_uploads(folder)
+    for name, note in take_inbox_files(folder).items():
+        new_meta[name] = {"note": note}
     rec = record_from_form(slug, request.form, list_kit_files(folder),
-                           new_notes)
+                           new_meta)
     rec["date_added"] = now_iso()
     write_lesson_json(folder, disk_record(rec))
     with LOCK:
         STATE["lessons"][slug] = rec
+    bump_materials_added()  # drives the "back up after N new materials" nudge
     log(f"created {slug!r} ({len(rec['files'])} file(s))")
     return jsonify(lesson=rec), 201
 
@@ -844,6 +1040,14 @@ def api_update(lid):
     file_notes.update(take_inbox_files(folder))
     rec = record_from_form(folder.name, request.form,
                            list_kit_files(folder), file_notes)
+    # role/transcript aren't part of the edit form; carry them over by name
+    saved_meta = stored_file_meta(folder)
+    for f in rec["files"]:
+        m = saved_meta.get(f["name"], {})
+        if m.get("role"):
+            f["role"] = m["role"]
+        if m.get("transcript"):
+            f["transcript"] = m["transcript"]
     with LOCK:
         prev = STATE["lessons"].get(folder.name)
         broken = STATE["needs"].get(folder.name)
@@ -867,15 +1071,12 @@ def api_add_files(lid):
     folder = resolve_lesson_dir(lid)
     if folder is None:
         abort(404)
-    saved, new_notes = receive_uploads(folder)
+    saved, new_meta = receive_uploads(folder)
     files = list_kit_files(folder)
     with LOCK:
         rec = STATE["lessons"].get(folder.name)
     if rec is not None:
-        merged = {f["name"]: f.get("note", "") for f in rec["files"]}
-        merged.update(new_notes)
-        files = order_files(files, [f["name"] for f in rec["files"]])
-        files = [dict(f, note=merged.get(f["name"], "")) for f in files]
+        files = merge_file_meta(files, rec["files"], new_meta)
         rec = dict(rec, id=folder.name, files=files)
         write_lesson_json(folder, disk_record(rec))
         with LOCK:
@@ -902,10 +1103,8 @@ def api_attach_inbox(lid):
     with LOCK:
         rec = STATE["lessons"].get(folder.name)
     if rec is not None:
-        merged = {f["name"]: f.get("note", "") for f in rec["files"]}
-        merged.update(taken)
-        files = order_files(files, [f["name"] for f in rec["files"]])
-        files = [dict(f, note=merged.get(f["name"], "")) for f in files]
+        new_meta = {name: {"note": note} for name, note in taken.items()}
+        files = merge_file_meta(files, rec["files"], new_meta)
         rec = dict(rec, id=folder.name, files=files)
         write_lesson_json(folder, disk_record(rec))
         with LOCK:
@@ -965,9 +1164,7 @@ def api_files_to_inbox(lid):
     with LOCK:
         rec = STATE["lessons"].get(folder.name)
     if rec is not None:
-        notes = {f["name"]: f.get("note", "") for f in rec["files"]}
-        files = order_files(files, [f["name"] for f in rec["files"]])
-        files = [dict(f, note=notes.get(f["name"], "")) for f in files]
+        files = merge_file_meta(files, rec["files"])
         rec = dict(rec, id=folder.name, files=files)
         write_lesson_json(folder, disk_record(rec))
         with LOCK:
@@ -1001,6 +1198,11 @@ def api_edit_file(lid):
     # a missing note field means "keep the current note"; an empty one clears it
     set_note = "note" in request.form
     note = clean_line(request.form.get("note"))
+    # role/transcript follow the same "present field updates, empty clears" rule
+    set_role = "role" in request.form
+    role = clean_line(request.form.get("role"))
+    set_transcript = "transcript" in request.form
+    transcript = str(request.form.get("transcript") or "").strip()
     renamed = new != old
     if renamed:
         if new.lower() in {n.lower() for n in valid if n != old}:
@@ -1019,14 +1221,33 @@ def api_edit_file(lid):
         rec = STATE["lessons"].get(folder.name)
     files = list_kit_files(folder)
     if rec is not None:
-        notes = {f["name"]: f.get("note", "") for f in rec["files"]}
+        by = {f["name"]: dict(f) for f in rec["files"]}
         order = [new if n == old else n for n in (f["name"] for f in rec["files"])]
-        kept = notes.get(old, "")
-        notes.pop(old, None)
-        notes[new] = note if set_note else kept
+        entry = by.pop(old, {})  # the edited file's stored meta, moved to `new`
+        if set_note:
+            entry["note"] = note
+        if set_role:
+            if role:
+                entry["role"] = role
+            else:
+                entry.pop("role", None)
+        if set_transcript:
+            if transcript:
+                entry["transcript"] = transcript
+            else:
+                entry.pop("transcript", None)
+        by[new] = entry
         files = order_files(files, order)
-        files = [dict(f, note=notes.get(f["name"], "")) for f in files]
-        rec = dict(rec, id=folder.name, files=files)
+        out = []
+        for f in files:
+            m = by.get(f["name"], {})
+            o = {"name": f["name"], "size": f["size"], "note": m.get("note", "")}
+            if m.get("role"):
+                o["role"] = m["role"]
+            if m.get("transcript"):
+                o["transcript"] = m["transcript"]
+            out.append(o)
+        rec = dict(rec, id=folder.name, files=out)
         write_lesson_json(folder, disk_record(rec))
         with LOCK:
             STATE["lessons"][folder.name] = rec
@@ -1066,8 +1287,7 @@ def api_reorder_files(lid):
     with LOCK:
         rec = STATE["lessons"].get(folder.name)
     if rec is not None:
-        notes = {f["name"]: f.get("note", "") for f in rec["files"]}
-        files = [dict(f, note=notes.get(f["name"], "")) for f in files]
+        files = attach_file_meta(files, rec["files"])  # keep the new order
         rec = dict(rec, id=folder.name, files=files)
         write_lesson_json(folder, disk_record(rec))
         with LOCK:
@@ -1113,12 +1333,96 @@ def api_log_usage(lid):
     entry = {"date": date,
              "group": clean_line(request.form.get("group")),
              "note": clean_line(request.form.get("note"))}
+    # Optional reflection captured in the same submit (run mode "Reflect").
+    rating = normalize_rating(request.form.get("rating"))
+    if rating is not None:
+        entry["rating"] = rating
+    reflection = clean_line(request.form.get("reflection"))
+    if reflection:
+        entry["reflection"] = reflection
+    if form_bool(request.form.get("needs_revision")):
+        entry["needs_revision"] = True
     rec = dict(rec, usage=list(rec.get("usage") or []) + [entry])
     write_lesson_json(folder, disk_record(rec))
     with LOCK:
         STATE["lessons"][folder.name] = rec
     log(f"logged use of {folder.name!r} on {date}")
     return jsonify(lesson=rec)
+
+
+@app.post("/api/lessons/<lid>/usage/update")
+def api_update_usage(lid):
+    """Add or edit the reflection on an existing teaching-log entry. Only the
+    posted reflection fields change; a present-but-empty field clears that key
+    so the sidecar never carries empty reflections."""
+    folder = resolve_lesson_dir(lid)
+    if folder is None:
+        abort(404)
+    with LOCK:
+        rec = STATE["lessons"].get(folder.name)
+    if rec is None:
+        abort(404)
+    try:
+        index = int(request.form.get("index", ""))
+    except ValueError:
+        return jsonify(error="index is required."), 400
+    usage = [dict(u) for u in (rec.get("usage") or [])]
+    if not 0 <= index < len(usage):
+        return jsonify(error="No such log entry."), 400
+    entry = usage[index]
+    if "rating" in request.form:
+        rating = normalize_rating(request.form.get("rating"))
+        if rating is None:
+            entry.pop("rating", None)
+        else:
+            entry["rating"] = rating
+    if "reflection" in request.form:
+        reflection = clean_line(request.form.get("reflection"))
+        if reflection:
+            entry["reflection"] = reflection
+        else:
+            entry.pop("reflection", None)
+    if "needs_revision" in request.form:
+        if form_bool(request.form.get("needs_revision")):
+            entry["needs_revision"] = True
+        else:
+            entry.pop("needs_revision", None)
+    rec = dict(rec, usage=usage)
+    write_lesson_json(folder, disk_record(rec))
+    with LOCK:
+        STATE["lessons"][folder.name] = rec
+    log(f"updated reflection on {folder.name!r} entry {index}")
+    return jsonify(lesson=rec)
+
+
+@app.get("/api/reflections")
+def api_reflections():
+    """Reverse-chronological feed of every teaching-log entry that carries a
+    reflection, a rating, or a needs-revision flag. ?needs_revision=true keeps
+    only the flagged ones."""
+    only_revision = form_bool(request.args.get("needs_revision"))
+    with LOCK:
+        lessons = list(STATE["lessons"].values())
+    out = []
+    for rec in lessons:
+        for u in rec.get("usage") or []:
+            needs = bool(u.get("needs_revision"))
+            if not (u.get("reflection") or u.get("rating") is not None or needs):
+                continue
+            if only_revision and not needs:
+                continue
+            out.append({
+                "material_id": rec["id"],
+                "material_name": rec["title"],
+                "date": u["date"],
+                "group": u.get("group", ""),
+                "rating": u.get("rating"),
+                "reflection": u.get("reflection", ""),
+                "needs_revision": needs,
+            })
+    out.sort(key=lambda r: (r["date"], r["material_name"].lower()),
+             reverse=True)
+    return jsonify(reflections=out)
 
 
 @app.post("/api/lessons/<lid>/usage/delete")
@@ -1309,9 +1613,13 @@ def api_health():
                             .isoformat(timespec="seconds") if mtime else ""),
             })
     inbox = list_inbox_files()
+    needs_revision = sum(
+        1 for r in lessons
+        if any(u.get("needs_revision") for u in (r.get("usage") or [])))
     return jsonify(
         materials=len(lessons),
         needs_attention=len(needs),
+        needs_revision=needs_revision,
         plans=len(plans),
         files=total_files,
         bytes=total_bytes,
@@ -1404,6 +1712,391 @@ def serve_kit_file(lid, filename):
 @app.errorhandler(413)
 def too_large(_):
     return jsonify(error="Upload too large (limit 512 MB per request)."), 413
+
+
+# ---- backup & restore (Feature E) -------------------------------------------
+# The ONLY feature permitted to touch a network, and only through a
+# destination the teacher explicitly configured: a local/rclone-mounted path
+# (Termux, desktop) or the Android Storage Access Framework bridge (any cloud
+# provider the phone has). When unconfigured, every /api/backup/* action route
+# returns 503 and the rest of the app is untouched. backup.json (at the data
+# root) is the only new file. See CLAUDE.md for the scoped relaxation.
+BACKUP_SUBDIRS = ("lessons", "plans", "Inbox", "Trash")
+BACKUP_NAME_RE = re.compile(r"^lesson-library-backup-\d{8}-\d{6}\.zip$")
+RESTORE_STRATEGIES = ("replace_all", "merge_skip", "merge_overwrite")
+
+
+def read_backup_config():
+    try:
+        raw = json.loads((DATA_DIR / "backup.json")
+                         .read_text(encoding="utf-8-sig"))
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def write_backup_config(cfg):
+    write_sidecar_json(DATA_DIR, "backup.json", cfg)
+
+
+def backup_configured(cfg=None):
+    cfg = read_backup_config() if cfg is None else cfg
+    dt = cfg.get("destination_type")
+    if dt == "local":
+        return bool(cfg.get("destination_path"))
+    if dt == "saf":
+        return bool(cfg.get("destination_uri"))
+    return False
+
+
+def material_count():
+    if not LESSONS_DIR.is_dir():
+        return 0
+    return sum(1 for e in LESSONS_DIR.iterdir() if e.is_dir())
+
+
+def bump_materials_added():
+    """After a material is created. No-op unless backup is configured, so an
+    offline library never grows a backup.json on its own."""
+    cfg = read_backup_config()
+    if not backup_configured(cfg):
+        return
+    cfg["materials_added_since_last_backup"] = \
+        int(cfg.get("materials_added_since_last_backup") or 0) + 1
+    write_backup_config(cfg)
+
+
+def backup_health_snapshot():
+    with LOCK:
+        lessons = list(STATE["lessons"].values())
+        needs = list(STATE["needs"].values())
+    untagged = [r["id"] for r in lessons
+                if not (r["cefr_levels"] or r["exam_targets"])
+                or not r["skills"] or not r["formats"] or not r["topics"]]
+    return {"created_at": now_iso(), "materials": len(lessons),
+            "needs_attention": len(needs), "untagged": untagged}
+
+
+def write_backup_zip(dest_file):
+    """Stream the whole data tree into a zip at dest_file (a Path). Folder
+    names — which are material/plan ids — are preserved exactly. Returns the
+    material count."""
+    count = material_count()
+    with zipfile.ZipFile(dest_file, "w", zipfile.ZIP_DEFLATED,
+                         allowZip64=True) as zf:
+        for sub in BACKUP_SUBDIRS:
+            base = DATA_DIR / sub
+            if not base.is_dir():
+                continue
+            for root, _dirs, files in os.walk(base):
+                for name in files:
+                    if name.lower().endswith(".tmp"):
+                        continue
+                    full = Path(root) / name
+                    zf.write(str(full), full.relative_to(DATA_DIR).as_posix())
+        zf.writestr("health.json",
+                    json.dumps(backup_health_snapshot(), ensure_ascii=False,
+                               indent=2))
+    return count
+
+
+def _saf_bridge():
+    """The Android Java bridge, or None off-device (Termux/desktop/tests)."""
+    try:
+        from java import jclass
+        return jclass("com.lessonlibrary.app.BackupBridge")
+    except Exception:
+        return None
+
+
+def deliver_backup(cfg, src_path, name):
+    if cfg.get("destination_type") == "local":
+        dest_dir = Path(cfg["destination_path"])
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(src_path), str(dest_dir / name))
+    else:
+        bridge = _saf_bridge()
+        if bridge is None:
+            raise RuntimeError("The backup folder isn't reachable on this "
+                               "device.")
+        bridge.writeBackupToUri(src_path.read_bytes(), name)
+
+
+def list_backups(cfg=None):
+    cfg = read_backup_config() if cfg is None else cfg
+    out = []
+    if cfg.get("destination_type") == "local":
+        d = Path(cfg.get("destination_path") or "")
+        if d.is_dir():
+            for entry in d.iterdir():
+                if entry.is_file() and BACKUP_NAME_RE.match(entry.name):
+                    try:
+                        st = entry.stat()
+                    except OSError:
+                        continue
+                    out.append({
+                        "name": entry.name, "size_bytes": st.st_size,
+                        "modified_at": (datetime.fromtimestamp(st.st_mtime)
+                                        .astimezone().isoformat(timespec="seconds"))})
+    else:
+        bridge = _saf_bridge()
+        if bridge is not None:
+            try:
+                names = json.loads(bridge.readBackupNames())
+            except Exception:
+                names = []
+            for n in names if isinstance(names, list) else []:
+                if isinstance(n, str) and BACKUP_NAME_RE.match(n):
+                    out.append({"name": n, "size_bytes": 0, "modified_at": ""})
+    out.sort(key=lambda b: b["name"], reverse=True)
+    return out
+
+
+def read_backup_bytes(cfg, name):
+    if not BACKUP_NAME_RE.match(name):  # also the traversal gate (no slashes)
+        raise ValueError("Not a backup file name.")
+    if cfg.get("destination_type") == "local":
+        return (Path(cfg["destination_path"]) / name).read_bytes()
+    bridge = _saf_bridge()
+    if bridge is None:
+        raise RuntimeError("The backup folder isn't reachable on this device.")
+    return bytes(bridge.readBackupBytes(name))
+
+
+def backup_is_due(cfg):
+    if not backup_configured(cfg):
+        return False
+    if cfg.get("auto_frequency") == "after_n_materials":
+        n = int(cfg.get("after_n_value") or 0)
+        if n > 0 and int(cfg.get("materials_added_since_last_backup") or 0) >= n:
+            return True
+    days = cfg.get("reminder_days")
+    if isinstance(days, (int, float)) and days > 0:
+        last = cfg.get("last_backup_at")
+        if not last:
+            return True
+        try:
+            then = datetime.fromisoformat(last)
+        except ValueError:
+            return True
+        now = datetime.now(then.tzinfo) if then.tzinfo else datetime.now()
+        if (now - then).total_seconds() >= days * 86400:
+            return True
+    return False
+
+
+def perform_backup():
+    cfg = read_backup_config()
+    if not backup_configured(cfg):
+        return None
+    name = "lesson-library-backup-" + datetime.now().strftime("%Y%m%d-%H%M%S") \
+           + ".zip"
+    tmp = DATA_DIR / (name + ".tmp")
+    try:
+        count = write_backup_zip(tmp)
+        size = tmp.stat().st_size
+        deliver_backup(cfg, tmp, name)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    cfg["last_backup_at"] = now_iso()
+    cfg["last_backup_size_bytes"] = size
+    cfg["last_backup_material_count"] = count
+    cfg["materials_added_since_last_backup"] = 0
+    write_backup_config(cfg)
+    return {"ok": True, "bytes": size, "material_count": count,
+            "timestamp": cfg["last_backup_at"], "name": name}
+
+
+def _dirs_in_zip(zf, sub):
+    out = set()
+    for n in zf.namelist():
+        parts = n.split("/")
+        if len(parts) >= 2 and parts[0] == sub and parts[1]:
+            out.add(parts[1])
+    return out
+
+
+def _extract_dir(zf, sub, did, base_dir):
+    """Replace base_dir/<did> with the backup's copy."""
+    target = base_dir / did
+    if target.exists():
+        shutil.rmtree(target)
+    prefix = sub + "/" + did + "/"
+    for n in zf.namelist():
+        if n.startswith(prefix) and not n.endswith("/"):
+            out = DATA_DIR / n
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(n) as src, open(out, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+
+def merge_subdir(zf, sub, strategy):
+    base = DATA_DIR / sub
+    base.mkdir(parents=True, exist_ok=True)
+    added, skipped, overwritten = [], [], []
+    for did in sorted(_dirs_in_zip(zf, sub)):
+        exists = (base / did).is_dir()
+        if exists and strategy == "merge_skip":
+            skipped.append(did)
+            continue
+        _extract_dir(zf, sub, did, base)
+        (overwritten if exists else added).append(did)
+    return added, skipped, overwritten
+
+
+def detect_conflicts(zf):
+    """Material ids whose lesson.json differs between the backup and the local
+    copy — i.e. both devices edited the same material. Reported, never
+    auto-resolved."""
+    conflicts = []
+    names = set(zf.namelist())
+    for mid in sorted(_dirs_in_zip(zf, "lessons")):
+        local = LESSONS_DIR / mid / "lesson.json"
+        member = "lessons/" + mid + "/lesson.json"
+        if not local.is_file() or member not in names:
+            continue
+        try:
+            if zf.read(member).strip() != local.read_bytes().strip():
+                conflicts.append(mid)
+        except Exception:
+            continue
+    return conflicts
+
+
+def perform_restore(backup_name, strategy):
+    cfg = read_backup_config()
+    if not backup_configured(cfg):
+        return None
+    if strategy not in RESTORE_STRATEGIES:
+        raise ValueError("Unknown restore strategy.")
+    data = read_backup_bytes(cfg, backup_name)
+    zf = zipfile.ZipFile(io.BytesIO(data))
+    conflicts = detect_conflicts(zf)        # before we touch the current state
+    safety = None                           # pre-restore safety backup
+    try:
+        res = perform_backup()
+        safety = res["name"] if res else None
+    except Exception:
+        safety = None
+    if strategy == "replace_all":
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        holder = DATA_DIR / ("Trash-restore-" + stamp)
+        holder.mkdir(parents=True, exist_ok=True)
+        for sub in BACKUP_SUBDIRS:
+            base = DATA_DIR / sub
+            if base.exists():
+                shutil.move(str(base), str(holder / sub))
+        ensure_dirs()
+        members = [n for n in zf.namelist()
+                   if n.split("/")[0] in BACKUP_SUBDIRS and not n.endswith("/")]
+        zf.extractall(DATA_DIR, members=members)
+        result = {"strategy": strategy,
+                  "restored": sorted(_dirs_in_zip(zf, "lessons")),
+                  "moved_aside": holder.name}
+    else:
+        la, ls, lo = merge_subdir(zf, "lessons", strategy)
+        pa, ps, po = merge_subdir(zf, "plans", strategy)
+        result = {"strategy": strategy, "added": la, "skipped": ls,
+                  "overwritten": lo, "plans_added": pa, "plans_skipped": ps,
+                  "plans_overwritten": po}
+    result["conflicts"] = conflicts
+    result["safety_backup"] = safety
+    rebuild_index()
+    return result
+
+
+@app.post("/api/backup/now")
+def api_backup_now():
+    if not backup_configured():
+        return jsonify(error="Backup isn't set up yet."), 503
+    try:
+        result = perform_backup()
+    except Exception as e:
+        log(f"backup failed: {e}")
+        return jsonify(error=f"Backup failed: {e}"), 500
+    log(f"backup {result['name']} ({result['bytes']} bytes)")
+    return jsonify(result)
+
+
+@app.get("/api/backup/status")
+def api_backup_status():
+    cfg = read_backup_config()
+    if not backup_configured(cfg):
+        return jsonify(error="Backup isn't set up yet.", configured=False), 503
+    out = dict(cfg)
+    out["configured"] = True
+    out["is_due"] = backup_is_due(cfg)
+    return jsonify(out)
+
+
+@app.get("/api/backup/list")
+def api_backup_list():
+    if not backup_configured():
+        return jsonify(error="Backup isn't set up yet."), 503
+    return jsonify(backups=list_backups())
+
+
+@app.post("/api/backup/restore")
+def api_backup_restore():
+    if not backup_configured():
+        return jsonify(error="Backup isn't set up yet."), 503
+    name = clean_line(request.form.get("backup_name"))
+    strategy = clean_line(request.form.get("strategy")) or "merge_skip"
+    if not BACKUP_NAME_RE.match(name):
+        return jsonify(error="Pick a backup to restore."), 400
+    if strategy not in RESTORE_STRATEGIES:
+        return jsonify(error="Unknown restore strategy."), 400
+    try:
+        result = perform_restore(name, strategy)
+    except Exception as e:
+        log(f"restore failed: {e}")
+        return jsonify(error=f"Restore failed: {e}"), 500
+    log(f"restored {name} via {strategy}")
+    return jsonify(result)
+
+
+@app.put("/api/backup/config")
+def api_backup_config():
+    """Configure (or reconfigure) the backup destination and cadence. This is
+    the route that turns the feature on, so it works while unconfigured."""
+    cfg = read_backup_config()
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = request.form.to_dict()
+    for k in ("destination_type", "destination_uri", "destination_path",
+              "auto_frequency", "after_n_value", "reminder_days"):
+        if k in body:
+            cfg[k] = body[k]
+    if cfg.get("destination_type") not in (None, "", "saf", "local"):
+        return jsonify(error="Unknown destination type."), 400
+    if cfg.get("after_n_value") is not None:
+        cfg["after_n_value"] = parse_duration(cfg.get("after_n_value")) or 0
+    if cfg.get("reminder_days") is not None:
+        try:
+            cfg["reminder_days"] = int(cfg.get("reminder_days"))
+        except (TypeError, ValueError):
+            cfg["reminder_days"] = 0
+    cfg.setdefault("materials_added_since_last_backup", 0)
+    write_backup_config(cfg)
+    out = dict(cfg)
+    out["configured"] = backup_configured(cfg)
+    out["is_due"] = backup_is_due(cfg)
+    return jsonify(out)
+
+
+@app.post("/api/backup/disconnect")
+def api_backup_disconnect():
+    cfg = read_backup_config()
+    if not backup_configured(cfg):
+        return jsonify(error="Backup isn't set up yet."), 503
+    for k in ("destination_type", "destination_uri", "destination_path"):
+        cfg.pop(k, None)
+    write_backup_config(cfg)
+    log("backup destination disconnected")
+    return jsonify(ok=True)
 
 
 # ---- startup ----------------------------------------------------------------------

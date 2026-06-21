@@ -48,6 +48,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class MainActivity extends Activity {
     private static final int STORAGE_REQUEST = 1001;
     private static final int FILE_REQUEST = 1002;
+    private static final int FOLDER_REQUEST = 1003;
     private static final String APP_URL = "http://127.0.0.1:8077/";
     private static final AtomicBoolean SERVER_STARTED = new AtomicBoolean(false);
 
@@ -60,6 +61,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        BackupBridge.init(getApplicationContext());
         buildScreen();
         configureWebView();
 
@@ -264,6 +266,30 @@ public class MainActivity extends Activity {
                             Toast.LENGTH_LONG).show();
                 }
             });
+        }
+
+        // ---- Feature E: pick a backup folder via the Storage Access
+        // Framework (Drive, OneDrive, Dropbox, local — all uniform). ----
+        @JavascriptInterface
+        public void pickBackupFolder() {
+            runOnUiThread(() -> {
+                Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                        | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                try {
+                    startActivityForResult(intent, FOLDER_REQUEST);
+                } catch (ActivityNotFoundException e) {
+                    Toast.makeText(MainActivity.this,
+                            "No folder picker available on this device.",
+                            Toast.LENGTH_LONG).show();
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void forgetBackupFolder() {
+            BackupBridge.clear();
         }
     }
 
@@ -531,6 +557,24 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == FOLDER_REQUEST) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                Uri uri = data.getData();
+                try {
+                    getContentResolver().takePersistableUriPermission(uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                } catch (Exception ignored) {
+                    // some providers grant access without a persistable claim
+                }
+                BackupBridge.setTreeUri(uri.toString());
+                final String picked = uri.toString();
+                runOnUiThread(() -> webView.evaluateJavascript(
+                        "window.onBackupFolderPicked && onBackupFolderPicked("
+                        + JSONObject.quote(picked) + ");", null));
+            }
+            return;
+        }
         if (requestCode != FILE_REQUEST || fileCallback == null) {
             return;
         }

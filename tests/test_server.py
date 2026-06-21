@@ -443,6 +443,121 @@ class TestUsageLog(LibraryTestCase):
                          [{"date": "2026-01-05", "group": "ok", "note": ""}])
 
 
+class TestReflections(LibraryTestCase):
+    """Feature A: the reflection trio on usage entries and the feed."""
+
+    def test_normalize_accepts_reflection_trio(self):
+        usage = server.normalize_usage([
+            {"date": "2026-06-01", "rating": 4,
+             "reflection": "  Paced too fast.  ", "needs_revision": True}])
+        self.assertEqual(usage, [{
+            "date": "2026-06-01", "group": "", "note": "",
+            "rating": 4, "reflection": "Paced too fast.",
+            "needs_revision": True}])
+
+    def test_normalize_rejects_out_of_range_rating(self):
+        for bad in (0, 6, -1, "x", 4.5, None):
+            usage = server.normalize_usage([{"date": "2026-06-01",
+                                             "rating": bad}])
+            self.assertNotIn("rating", usage[0], msg=repr(bad))
+        # in-range values are kept
+        usage = server.normalize_usage([{"date": "2026-06-01", "rating": "5"}])
+        self.assertEqual(usage[0]["rating"], 5)
+
+    def test_normalize_empty_reflection_is_unset(self):
+        usage = server.normalize_usage([{"date": "2026-06-01",
+                                         "reflection": "   "}])
+        self.assertNotIn("reflection", usage[0])
+
+    def test_normalize_needs_revision_defaults_false_and_omitted(self):
+        usage = server.normalize_usage([{"date": "2026-06-01"}])
+        self.assertNotIn("needs_revision", usage[0])
+        usage = server.normalize_usage([{"date": "2026-06-01",
+                                         "needs_revision": False}])
+        self.assertNotIn("needs_revision", usage[0])
+        usage = server.normalize_usage([{"date": "2026-06-01",
+                                         "needs_revision": 1}])
+        self.assertTrue(usage[0]["needs_revision"])
+
+    def test_v1_usage_without_reflection_still_loads(self):
+        self.write_folder("kit", meta={
+            "title": "Kit",
+            "usage": [{"date": "2026-01-05", "group": "ok", "note": "n"}]})
+        server.rebuild_index()
+        rec = server.STATE["lessons"]["kit"]
+        self.assertEqual(rec["usage"],
+                         [{"date": "2026-01-05", "group": "ok", "note": "n"}])
+
+    def test_log_usage_persists_reflection_fields(self):
+        rec = self.create_material().get_json()["lesson"]
+        out = self.client.post(
+            "/api/lessons/" + rec["id"] + "/usage",
+            data={"date": "2026-06-12", "rating": "4",
+                  "reflection": "Needs more CCQs", "needs_revision": "true"},
+            content_type="multipart/form-data").get_json()["lesson"]
+        entry = out["usage"][0]
+        self.assertEqual(entry["rating"], 4)
+        self.assertEqual(entry["reflection"], "Needs more CCQs")
+        self.assertTrue(entry["needs_revision"])
+        self.assertEqual(self.disk_json(rec["id"])["usage"], out["usage"])
+
+    def test_update_usage_edits_and_clears_reflection(self):
+        rec = self.create_material().get_json()["lesson"]
+        self.client.post("/api/lessons/" + rec["id"] + "/usage",
+                         data={"date": "2026-06-12"},
+                         content_type="multipart/form-data")
+        out = self.client.post(
+            "/api/lessons/" + rec["id"] + "/usage/update",
+            data={"index": "0", "rating": "5", "reflection": "Great",
+                  "needs_revision": "true"},
+            content_type="multipart/form-data").get_json()["lesson"]
+        self.assertEqual(out["usage"][0]["rating"], 5)
+        # clearing: empty reflection + falsey flag remove the keys
+        out = self.client.post(
+            "/api/lessons/" + rec["id"] + "/usage/update",
+            data={"index": "0", "reflection": "", "needs_revision": "false"},
+            content_type="multipart/form-data").get_json()["lesson"]
+        self.assertNotIn("reflection", out["usage"][0])
+        self.assertNotIn("needs_revision", out["usage"][0])
+        self.assertEqual(out["usage"][0]["rating"], 5)
+
+    def test_reflections_feed_only_includes_reflective_entries(self):
+        rec = self.create_material().get_json()["lesson"]
+        # plain use -> excluded
+        self.client.post("/api/lessons/" + rec["id"] + "/usage",
+                         data={"date": "2026-06-01"},
+                         content_type="multipart/form-data")
+        # rated use -> included
+        self.client.post("/api/lessons/" + rec["id"] + "/usage",
+                         data={"date": "2026-06-02", "rating": "2"},
+                         content_type="multipart/form-data")
+        feed = self.client.get("/api/reflections").get_json()["reflections"]
+        self.assertEqual(len(feed), 1)
+        self.assertEqual(feed[0]["material_id"], rec["id"])
+        self.assertEqual(feed[0]["rating"], 2)
+
+    def test_reflections_feed_needs_revision_filter(self):
+        rec = self.create_material().get_json()["lesson"]
+        self.client.post("/api/lessons/" + rec["id"] + "/usage",
+                         data={"date": "2026-06-02", "rating": "5"},
+                         content_type="multipart/form-data")
+        self.client.post("/api/lessons/" + rec["id"] + "/usage",
+                         data={"date": "2026-06-03", "needs_revision": "true"},
+                         content_type="multipart/form-data")
+        flagged = self.client.get(
+            "/api/reflections?needs_revision=true").get_json()["reflections"]
+        self.assertEqual(len(flagged), 1)
+        self.assertTrue(flagged[0]["needs_revision"])
+
+    def test_health_counts_materials_needing_revision(self):
+        rec = self.create_material().get_json()["lesson"]
+        self.client.post("/api/lessons/" + rec["id"] + "/usage",
+                         data={"date": "2026-06-03", "needs_revision": "true"},
+                         content_type="multipart/form-data")
+        h = self.client.get("/api/health").get_json()
+        self.assertEqual(h["needs_revision"], 1)
+
+
 class TestPlans(LibraryTestCase):
     def make_plan(self, **over):
         data = {"title": "Tuesday B2", "group": "B2 evening",
@@ -512,6 +627,34 @@ class TestPlans(LibraryTestCase):
         self.assertTrue(plan["unreadable"])
         self.assertEqual(plan["title"], "broken")
 
+    def test_stage_durations_accepted_and_validated(self):
+        plan = self.make_plan().get_json()["plan"]
+        out = self.client.post(
+            "/api/plans/" + plan["id"],
+            data={"title": plan["title"], "stage_durations": json.dumps(
+                {"warmer": 8, "break": "5", "cool-down": 10})},
+            content_type="multipart/form-data").get_json()["plan"]
+        self.assertEqual(out["stage_durations"],
+                         {"warmer": 8, "break": 5, "cool-down": 10})
+        server.rebuild_index()
+        again = server.STATE["plans"][plan["id"]]
+        self.assertEqual(again["stage_durations"], out["stage_durations"])
+
+    def test_stage_durations_drops_invalid_values(self):
+        plan = self.make_plan().get_json()["plan"]
+        out = self.client.post(
+            "/api/plans/" + plan["id"],
+            data={"title": plan["title"], "stage_durations": json.dumps(
+                {"warmer": -3, "break": "soon", "cool-down": 999,
+                 "bogus": 5})},
+            content_type="multipart/form-data").get_json()["plan"]
+        # all invalid or unknown keys dropped, never written
+        self.assertEqual(out["stage_durations"], {})
+
+    def test_plan_without_stage_durations_defaults_empty(self):
+        plan = self.make_plan().get_json()["plan"]
+        self.assertEqual(plan["stage_durations"], {})
+
     def test_placeholder_items_round_trip(self):
         plan = self.make_plan().get_json()["plan"]
         items = [{"placeholder": "Warmer", "duration_min": 5},
@@ -533,6 +676,122 @@ class TestPlans(LibraryTestCase):
         server.rebuild_index()
         again = server.STATE["plans"][plan["id"]]
         self.assertEqual(again["items"], out["items"])
+
+
+class TestFileRoles(LibraryTestCase):
+    """Feature D: per-file role + transcript on files[]."""
+
+    def test_normalize_accepts_role_and_transcript(self):
+        raw = {"title": "t", "files": [
+            {"name": "a.pdf", "note": "n", "role": "Answer key"},
+            {"name": "b.mp3", "role": "Audio", "transcript": "  Hello.  "}]}
+        files = [{"name": "a.pdf", "size": 1}, {"name": "b.mp3", "size": 2}]
+        rec = server.normalize_record("x", raw, files)
+        by = {f["name"]: f for f in rec["files"]}
+        self.assertEqual(by["a.pdf"]["role"], "Answer key")
+        self.assertEqual(by["b.mp3"]["role"], "Audio")
+        self.assertEqual(by["b.mp3"]["transcript"], "Hello.")
+
+    def test_v1_files_have_no_role_keys(self):
+        rec = server.normalize_record(
+            "x", {"title": "t", "files": [{"name": "a.pdf", "note": "n"}]},
+            [{"name": "a.pdf", "size": 1}])
+        self.assertNotIn("role", rec["files"][0])
+        self.assertNotIn("transcript", rec["files"][0])
+        # blank role/transcript are dropped, not stored as keys
+        rec = server.normalize_record(
+            "x", {"title": "t",
+                  "files": [{"name": "a.pdf", "role": "  ", "transcript": ""}]},
+            [{"name": "a.pdf", "size": 1}])
+        self.assertNotIn("role", rec["files"][0])
+        self.assertNotIn("transcript", rec["files"][0])
+
+    def test_payload_includes_curated_file_roles(self):
+        payload = self.client.get("/api/lessons").get_json()
+        flat = [o for g in payload["file_roles"] for o in g["options"]]
+        self.assertIn("Student handout", flat)
+        self.assertIn("Answer key", flat)
+        self.assertIn("Audio", flat)
+
+    def test_upload_with_role_persists(self):
+        resp = self.create_material(
+            files=[(io.BytesIO(b"k"), "answer-key.pdf")],
+            file_roles=json.dumps(["Answer key"]))
+        rec = resp.get_json()["lesson"]
+        self.assertEqual(rec["files"][0]["role"], "Answer key")
+        disk = {f["name"]: f for f in self.disk_json(rec["id"])["files"]}
+        self.assertEqual(disk["answer-key.pdf"]["role"], "Answer key")
+
+    def test_edit_file_sets_role_and_transcript(self):
+        rec = self.create_material(
+            files=[(io.BytesIO(b"a"), "a.mp3")]).get_json()["lesson"]
+        out = self.client.post(
+            "/api/lessons/" + rec["id"] + "/files/edit",
+            data={"old": "a.mp3", "name": "a.mp3", "role": "Audio",
+                  "transcript": "Speaker 1: Hi."},
+            content_type="multipart/form-data").get_json()["lesson"]
+        self.assertEqual(out["files"][0]["role"], "Audio")
+        self.assertEqual(out["files"][0]["transcript"], "Speaker 1: Hi.")
+        # clearing the role removes the key
+        out = self.client.post(
+            "/api/lessons/" + rec["id"] + "/files/edit",
+            data={"old": "a.mp3", "name": "a.mp3", "role": ""},
+            content_type="multipart/form-data").get_json()["lesson"]
+        self.assertNotIn("role", out["files"][0])
+        self.assertEqual(out["files"][0]["transcript"], "Speaker 1: Hi.")
+
+    def test_role_survives_rename_and_metadata_edit(self):
+        rec = self.create_material(
+            files=[(io.BytesIO(b"a"), "a.pdf")]).get_json()["lesson"]
+        self.client.post("/api/lessons/" + rec["id"] + "/files/edit",
+                         data={"old": "a.pdf", "name": "a.pdf",
+                               "role": "Student handout"},
+                         content_type="multipart/form-data")
+        # rename keeps the role
+        out = self.client.post(
+            "/api/lessons/" + rec["id"] + "/files/edit",
+            data={"old": "a.pdf", "name": "handout.pdf"},
+            content_type="multipart/form-data").get_json()["lesson"]
+        self.assertEqual(out["files"][0]["role"], "Student handout")
+        # editing the material's metadata (no role posted) keeps the role
+        out = self.client.post(
+            "/api/lessons/" + rec["id"],
+            data={"title": "Renamed", "skills": ["Reading"]},
+            content_type="multipart/form-data").get_json()["lesson"]
+        self.assertEqual(out["files"][0]["role"], "Student handout")
+        self.assertEqual(self.disk_json(rec["id"])["files"][0]["role"],
+                         "Student handout")
+
+    def test_role_survives_add_files_and_reorder(self):
+        rec = self.create_material(
+            files=[(io.BytesIO(b"a"), "a.pdf")]).get_json()["lesson"]
+        self.client.post("/api/lessons/" + rec["id"] + "/files/edit",
+                         data={"old": "a.pdf", "name": "a.pdf",
+                               "role": "Answer key"},
+                         content_type="multipart/form-data")
+        self.client.post(
+            "/api/lessons/" + rec["id"] + "/files",
+            data={"files": [(io.BytesIO(b"b"), "b.pdf")]},
+            content_type="multipart/form-data")
+        out = self.client.post(
+            "/api/lessons/" + rec["id"] + "/files/reorder",
+            data={"order": json.dumps(["b.pdf", "a.pdf"])},
+            content_type="multipart/form-data").get_json()["lesson"]
+        self.assertEqual([f["name"] for f in out["files"]], ["b.pdf", "a.pdf"])
+        roles = {f["name"]: f.get("role") for f in out["files"]}
+        self.assertEqual(roles["a.pdf"], "Answer key")
+        self.assertIsNone(roles["b.pdf"])
+
+    def test_custom_role_preserved_and_in_catalog(self):
+        rec = self.create_material(
+            files=[(io.BytesIO(b"a"), "a.pdf")]).get_json()["lesson"]
+        self.client.post("/api/lessons/" + rec["id"] + "/files/edit",
+                         data={"old": "a.pdf", "name": "a.pdf",
+                               "role": "Realia photo"},
+                         content_type="multipart/form-data")
+        payload = self.client.get("/api/lessons").get_json()
+        self.assertEqual(payload["file_roles"][0]["group"], "Your library")
+        self.assertIn("Realia photo", payload["file_roles"][0]["options"])
 
 
 class TestInbox(LibraryTestCase):
@@ -686,6 +945,139 @@ class TestInboxBatchAndImport(LibraryTestCase):
         self.assertTrue((server.TRASH_DIR / rec["id"]).exists())
         with server.LOCK:
             self.assertNotIn(rec["id"], server.STATE["lessons"])
+
+
+class TestBackup(LibraryTestCase):
+    """Feature E: zip/restore, merge strategies, config, and the 503 gate."""
+
+    def setUp(self):
+        super().setUp()
+        self.dest = self.data / "drive"
+        self.dest.mkdir()
+
+    def configure(self, **over):
+        body = {"destination_type": "local",
+                "destination_path": str(self.dest)}
+        body.update(over)
+        return self.client.put("/api/backup/config", json=body)
+
+    def test_routes_503_until_configured(self):
+        for path in ("/api/backup/status", "/api/backup/list"):
+            self.assertEqual(self.client.get(path).status_code, 503)
+        self.assertEqual(self.client.post("/api/backup/now").status_code, 503)
+        self.assertEqual(self.client.post(
+            "/api/backup/restore",
+            data={"backup_name": "x", "strategy": "merge_skip"},
+            content_type="multipart/form-data").status_code, 503)
+        # the rest of the app is unaffected
+        self.assertEqual(self.client.get("/api/lessons").status_code, 200)
+        self.assertFalse((self.data / "backup.json").exists())
+
+    def test_backup_now_writes_valid_zip(self):
+        self.create_material(title="Zipped",
+                             files=[(io.BytesIO(b"hello"), "a.pdf")])
+        self.configure()
+        out = self.client.post("/api/backup/now").get_json()
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["material_count"], 1)
+        zips = list(self.dest.glob("lesson-library-backup-*.zip"))
+        self.assertEqual(len(zips), 1)
+        import zipfile
+        with zipfile.ZipFile(zips[0]) as zf:
+            self.assertIsNone(zf.testzip())
+            names = zf.namelist()
+            self.assertIn("lessons/zipped/a.pdf", names)
+            self.assertIn("lessons/zipped/lesson.json", names)
+            self.assertIn("health.json", names)
+
+    def make_backup(self):
+        self.configure()
+        return self.client.post("/api/backup/now").get_json()["name"]
+
+    def test_restore_replace_all_moves_current_aside(self):
+        self.create_material(title="Keeper")
+        name = self.make_backup()
+        # add a material that exists only locally (not in the backup)
+        self.create_material(title="Local only")
+        out = self.client.post(
+            "/api/backup/restore",
+            data={"backup_name": name, "strategy": "replace_all"},
+            content_type="multipart/form-data").get_json()
+        self.assertTrue(out["moved_aside"].startswith("Trash-restore-"))
+        self.assertTrue((self.data / out["moved_aside"]).is_dir())
+        # only the backed-up material remains
+        ids = set(server.STATE["lessons"])
+        self.assertIn("keeper", ids)
+        self.assertNotIn("local-only", ids)
+
+    def test_restore_merge_skip_keeps_existing(self):
+        self.create_material(title="Shared")
+        name = self.make_backup()
+        # change the local copy after the backup
+        self.client.post("/api/lessons/shared",
+                         data={"title": "Shared", "notes": "edited locally"},
+                         content_type="multipart/form-data")
+        self.client.post(
+            "/api/backup/restore",
+            data={"backup_name": name, "strategy": "merge_skip"},
+            content_type="multipart/form-data")
+        self.assertEqual(self.disk_json("shared")["notes"], "edited locally")
+
+    def test_restore_merge_overwrite_replaces_existing(self):
+        self.create_material(title="Shared")
+        name = self.make_backup()
+        self.client.post("/api/lessons/shared",
+                         data={"title": "Shared", "notes": "edited locally"},
+                         content_type="multipart/form-data")
+        self.client.post(
+            "/api/backup/restore",
+            data={"backup_name": name, "strategy": "merge_overwrite"},
+            content_type="multipart/form-data")
+        # the backup had no notes, so overwrite wipes the local edit
+        self.assertEqual(self.disk_json("shared")["notes"], "")
+
+    def test_conflict_detection(self):
+        self.create_material(title="Shared")
+        name = self.make_backup()
+        self.client.post("/api/lessons/shared",
+                         data={"title": "Shared", "notes": "diverged"},
+                         content_type="multipart/form-data")
+        out = self.client.post(
+            "/api/backup/restore",
+            data={"backup_name": name, "strategy": "merge_skip"},
+            content_type="multipart/form-data").get_json()
+        self.assertIn("shared", out["conflicts"])
+
+    def test_materials_added_counter_increments_and_resets(self):
+        self.configure()
+        self.create_material(title="One")
+        self.create_material(title="Two")
+        cfg = json.loads((self.data / "backup.json").read_text())
+        self.assertEqual(cfg["materials_added_since_last_backup"], 2)
+        self.client.post("/api/backup/now")
+        cfg = json.loads((self.data / "backup.json").read_text())
+        self.assertEqual(cfg["materials_added_since_last_backup"], 0)
+
+    def test_is_due_for_reminder_and_after_n(self):
+        self.configure(reminder_days=7, auto_frequency="after_n_materials",
+                       after_n_value=2)
+        # never backed up -> due on the reminder
+        self.assertTrue(self.client.get(
+            "/api/backup/status").get_json()["is_due"])
+        self.client.post("/api/backup/now")
+        status = self.client.get("/api/backup/status").get_json()
+        self.assertFalse(status["is_due"])
+        # two new materials hits the after-N threshold
+        self.create_material(title="A")
+        self.create_material(title="B")
+        self.assertTrue(self.client.get(
+            "/api/backup/status").get_json()["is_due"])
+
+    def test_disconnect_clears_destination(self):
+        self.configure()
+        self.client.post("/api/backup/disconnect")
+        self.assertEqual(self.client.get(
+            "/api/backup/status").status_code, 503)
 
 
 class TestHealthAndMaintenance(LibraryTestCase):

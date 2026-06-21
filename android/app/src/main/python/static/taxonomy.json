@@ -284,5 +284,14 @@
         "Duolingo English Test"
       ]
     }
+  ],
+  "file_roles": [
+    "Student handout",
+    "Teacher notes",
+    "Answer key",
+    "Audio",
+    "Slides",
+    "Cards",
+    "Other"
   ]
 }

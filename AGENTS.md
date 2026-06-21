@@ -21,7 +21,7 @@ phone — there is no cloud, no database, no network calls. **The folders on dis
 ## Verify your work
 
 ```bash
-python tests/test_server.py        # 69 tests, must stay green (Windows: py tests\test_server.py)
+python tests/test_server.py        # 99 tests, must stay green (Windows: py tests\test_server.py)
 ```
 
 For UI changes, run the server (`LESSONLIB_DATA_DIR=/tmp/matlib python server.py`)

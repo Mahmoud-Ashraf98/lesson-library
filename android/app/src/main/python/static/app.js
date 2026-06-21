@@ -44,6 +44,7 @@ function lsSet(k, v) {
 let filtersOpen = true;        // filter panel on the list view (session only)
 let listLayout = lsGet("mlib-list-layout") === "grid" ? "grid" : "list";
 let fileLayout = lsGet("mlib-file-layout") === "grid" ? "grid" : "list";
+let hideKeys = lsGet("mlib-hide-keys") === "1";   // hide answer-key files (Feature D)
 
 const view = document.getElementById("view");
 const $ = (s, el = document) => el.querySelector(s);
@@ -112,6 +113,12 @@ const ICONS = {
   moon: '<path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/>',
   monitor: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>',
   rescan: '<path d="M21 12a9 9 0 1 1-2.6-6.3L21 8"/><path d="M21 3v5h-5"/>',
+  star: '<path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>',
+  cloud: '<path d="M17.5 19a4.5 4.5 0 1 0-1.4-8.78A6 6 0 1 0 6 15.9"/><path d="M12 12v9"/><path d="m8 17 4 4 4-4"/>',
+  cloudup: '<path d="M17.5 19a4.5 4.5 0 1 0-1.4-8.78A6 6 0 1 0 6 15.9"/><path d="M12 21v-9"/><path d="m8 16 4-4 4 4"/>',
+  timer: '<line x1="10" y1="2" x2="14" y2="2"/><line x1="12" y1="14" x2="15" y2="11"/><circle cx="12" cy="14" r="8"/>',
+  shuffle: '<path d="M2 18h1.4c1.3 0 2.5-.7 3.2-1.8l6.8-10.4c.7-1.1 1.9-1.8 3.2-1.8H22"/><path d="m18 2 4 4-4 4"/><path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/><path d="M14.5 15.8c.7 1.3 2.1 2.2 3.6 2.2H22"/><path d="m18 14 4 4-4 4"/>',
+  hand: '<path d="M18 11V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2"/><path d="M14 10V4a2 2 0 0 0-2-2 2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/>',
 };
 
 function icon(name, cls) {
@@ -120,7 +127,39 @@ function icon(name, cls) {
     `${ICONS[name] || ICONS.file}</svg>`;
 }
 
+/* ---- star ratings (Feature A): filled vs outline, inline SVG only ---- */
+function starSVG(filled) {
+  return `<svg class="star${filled ? " on" : ""}" viewBox="0 0 24 24" ` +
+    `fill="${filled ? "currentColor" : "none"}" stroke="currentColor" ` +
+    `stroke-width="1.6" stroke-linejoin="round" aria-hidden="true">${ICONS.star}</svg>`;
+}
+
+function starsHTML(rating) {
+  const r = rating || 0;
+  let s = "";
+  for (let i = 1; i <= 5; i++) s += starSVG(i <= r);
+  return `<span class="stars" aria-label="${r ? r + " out of 5 stars" : "no rating"}">${s}</span>`;
+}
+
 const IMAGE_RE = /\.(jpe?g|png|gif|webp|svg|bmp|heic)$/i;
+const AUDIO_RE = /\.(mp3|wav|ogg|m4a|flac|aac)$/i;
+
+/* ---- per-file component roles (Feature D) ---- */
+const ROLE_ICONS = {
+  "student handout": "filetext", "teacher notes": "pencil",
+  "answer key": "circlecheck", "audio": "music", "slides": "slides",
+  "cards": "sheet", "other": "file",
+};
+function roleIcon(role) {
+  return ROLE_ICONS[String(role || "").toLowerCase()] || "tags";
+}
+function isAnswerKey(f) {
+  return String(f.role || "").toLowerCase() === "answer key";
+}
+function isAudioRole(f) {
+  return String(f.role || "").toLowerCase() === "audio" || AUDIO_RE.test(f.name);
+}
+
 const FILE_KINDS = [
   [/\.(pdf|docx?|txt|rtf|odt|md)$/i, "filetext", ""],
   [/\.(pptx?|odp|key)$/i, "slides", ""],
@@ -369,6 +408,16 @@ function fillGroupsDatalist() {
     .map(g => `<option value="${esc(g)}">`).join("");
 }
 
+function fillRolesDatalist() {
+  const el = $("#rolesdl");
+  if (!el) return;
+  const roles = [];
+  for (const g of (DB && DB.file_roles) || []) {
+    for (const o of g.options || []) roles.push(o);
+  }
+  el.innerHTML = roles.map(r => `<option value="${esc(r)}">`).join("");
+}
+
 async function api(url, opts) {
   const res = await fetch(url, opts);
   let data = null;
@@ -547,6 +596,85 @@ async function deleteUsage(mid, index) {
   return replaceMaterial(out.lesson);
 }
 
+/* Feature A: write the reflection trio onto an existing usage entry. */
+async function saveReflection(mid, index, fields) {
+  const out = await api("/api/lessons/" + encodeURIComponent(mid) +
+    "/usage/update", { method: "POST", body: formBody({
+      index,
+      rating: fields.rating == null ? "" : fields.rating,
+      reflection: fields.reflection || "",
+      needs_revision: fields.needs_revision ? "true" : "false",
+    }) });
+  return replaceMaterial(out.lesson);
+}
+
+// Lightweight reflection sheet. Resolves {rating, reflection, needs_revision}
+// on Save, or null on Skip / dismiss.
+function openReflectDialog(material, preset) {
+  const dlg = $("#reflectdlg");
+  if (!openDialog(dlg)) return Promise.resolve(null);
+  preset = preset || {};
+  $("#rf-heading").textContent = preset.editing ? "Edit reflection" : "Quick reflection";
+  $("#rf-mat").textContent = material.title;
+  let rating = preset.rating || 0;
+  const starsEl = $("#rf-stars");
+  function paintStars() {
+    starsEl.innerHTML = [1, 2, 3, 4, 5].map(i =>
+      `<button type="button" class="starbtn${i <= rating ? " on" : ""}"
+               data-star="${i}" role="radio" aria-checked="${i === rating}"
+               aria-label="${i} star${i === 1 ? "" : "s"}">${starSVG(i <= rating)}</button>`).join("");
+  }
+  paintStars();
+  $("#rf-note").value = preset.reflection || "";
+  $("#rf-revision").checked = !!preset.needs_revision;
+  $("#rf-skip").textContent = preset.editing ? "Cancel" : "Skip";
+  return new Promise(resolve => {
+    const form = $("#rf-form"), skip = $("#rf-skip");
+    function onStars(e) {
+      const b = e.target.closest("[data-star]");
+      if (!b) return;
+      const v = +b.dataset.star;
+      rating = v === rating ? 0 : v;  // tap the same star again to clear
+      paintStars();
+    }
+    function finish(val) {
+      starsEl.removeEventListener("click", onStars);
+      form.removeEventListener("submit", onSubmit);
+      skip.removeEventListener("click", onSkip);
+      dlg.removeEventListener("cancel", onEsc);
+      if (dlg.open) dlg.close();
+      resolve(val);
+    }
+    function onSubmit(e) {
+      e.preventDefault();
+      finish({ rating: rating || null,
+               reflection: $("#rf-note").value.trim(),
+               needs_revision: $("#rf-revision").checked });
+    }
+    function onSkip() { finish(null); }
+    function onEsc(e) { e.preventDefault(); finish(null); }
+    starsEl.addEventListener("click", onStars);
+    form.addEventListener("submit", onSubmit);
+    skip.addEventListener("click", onSkip);
+    dlg.addEventListener("cancel", onEsc);
+  });
+}
+
+// Open the reflection sheet for a material's usage entry, then persist.
+async function reflectOnEntry(material, index, preset) {
+  const fresh = DB.lessons.find(x => x.id === material.id) || material;
+  const fields = await openReflectDialog(fresh, preset);
+  if (!fields) return false;
+  try {
+    await saveReflection(material.id, index, fields);
+    toast("Reflection saved");
+    return true;
+  } catch (err) {
+    toast("Could not save reflection: " + err.message, "error");
+    return false;
+  }
+}
+
 function openUsageDialog(material, preset) {
   const dlg = $("#usagedlg");
   if (!openDialog(dlg)) return Promise.resolve(null);
@@ -586,8 +714,14 @@ function openFileEditDialog(file) {
     if (name == null) return Promise.resolve(null);
     return Promise.resolve({ name: name.trim() || file.name, note: file.note || "" });
   }
+  fillRolesDatalist();
   $("#fe-name").value = file.name;
   $("#fe-note").value = file.note || "";
+  $("#fe-role").value = file.role || "";
+  $("#fe-transcript").value = file.transcript || "";
+  // the transcript field only makes sense for audio (or anything already
+  // carrying one) — keep the dialog tidy for documents
+  $("#fe-transcript-field").hidden = !(isAudioRole(file) || file.transcript);
   const nameEl = $("#fe-name");
   nameEl.focus();
   // place the caret before the extension so the readable part is easiest to fix
@@ -595,10 +729,17 @@ function openFileEditDialog(file) {
   try { nameEl.setSelectionRange(0, dot > 0 ? dot : file.name.length); } catch (e) { /* type=text only */ }
   return new Promise(resolve => {
     const form = $("#fe-form"), cancel = $("#fe-cancel"), remove = $("#fe-remove");
+    const roleEl = $("#fe-role");
+    function syncTranscript() {
+      $("#fe-transcript-field").hidden =
+        !(String(roleEl.value).toLowerCase() === "audio"
+          || AUDIO_RE.test(file.name) || $("#fe-transcript").value.trim());
+    }
     function finish(val) {
       form.removeEventListener("submit", onSubmit);
       cancel.removeEventListener("click", onCancel);
       remove.removeEventListener("click", onRemove);
+      roleEl.removeEventListener("input", syncTranscript);
       dlg.removeEventListener("cancel", onEsc);
       if (dlg.open) dlg.close();
       resolve(val);
@@ -607,8 +748,11 @@ function openFileEditDialog(file) {
       e.preventDefault();
       const name = $("#fe-name").value.trim();
       if (!name) { $("#fe-name").focus(); return; }
-      finish({ name: name, note: $("#fe-note").value.trim() });
+      finish({ name: name, note: $("#fe-note").value.trim(),
+               role: $("#fe-role").value.trim(),
+               transcript: $("#fe-transcript").value.trim() });
     }
+    roleEl.addEventListener("input", syncTranscript);
     function onCancel() { finish(null); }
     function onRemove() { finish({ remove: true }); }
     function onEsc(e) { e.preventDefault(); finish(null); }
@@ -627,6 +771,7 @@ async function savePlan(plan) {
       title: plan.title, group: plan.group || "",
       plan_date: plan.plan_date || "", notes: plan.notes || "",
       items: JSON.stringify(plan.items || []),
+      stage_durations: JSON.stringify(plan.stage_durations || {}),
     }),
   });
   return replacePlan(out.plan);
@@ -755,6 +900,7 @@ function route() {
   const h = location.hash || "#/";
   if (h === "#/add") return { view: "add" };
   if (h === "#/plans") return { view: "plans" };
+  if (h === "#/reflections") return { view: "reflections" };
   if (h === "#/inbox") return { view: "inbox" };
   if (h === "#/settings") return { view: "settings" };
   if (h === "#/health") return { view: "health" };
@@ -776,7 +922,8 @@ function route() {
 const NAV_GROUP = {
   list: "library", lesson: "library", add: "library", edit: "library",
   repair: "library", plans: "plans", plan: "plans", pick: "plans",
-  run: "plans", inbox: "inbox", health: "settings", settings: "settings",
+  run: "plans", reflections: "reflections", inbox: "inbox",
+  health: "settings", settings: "settings",
 };
 
 function updateInboxBadge() {
@@ -798,8 +945,14 @@ function configureChrome(r) {
   updateInboxBadge();
 }
 
+let _runTicker = null;   // the single run-mode countdown interval (Feature B)
+function stopRunTicker() {
+  if (_runTicker) { clearInterval(_runTicker); _runTicker = null; }
+}
+
 function render() {
   if (!DB) return;
+  stopRunTicker();  // leaving any view tears down a running class timer
   const r = route();
   if (lastView === "list" && r.view !== "list") listScroll = window.scrollY;
   configureChrome(r);
@@ -815,6 +968,7 @@ function render() {
     else if (r.view === "plan") renderPlan(r.id);
     else if (r.view === "pick") renderPick(r.id);
     else if (r.view === "run") renderRun(r.id);
+    else if (r.view === "reflections") renderReflections();
     else if (r.view === "inbox") renderInbox();
     else if (r.view === "settings") renderSettings();
     else if (r.view === "health") renderHealth();
@@ -996,7 +1150,8 @@ function searchHay(m) {
           ...(m.exam_targets || []), ...(m.skills || []),
           ...(m.formats || []),
           ...ARRAY_SEARCH_FIELDS.flatMap(f => m[f] || []),
-          ...(m.files || []).map(f => f.name + "\n" + (f.note || ""))]
+          ...(m.files || []).map(f => [f.name, f.note || "", f.role || "",
+                                       f.transcript || ""].join("\n"))]
     .join("\n").toLowerCase();
 }
 
@@ -1124,6 +1279,7 @@ function renderList() {
       <div id="recentwrap" class="recentwrap" hidden></div>
     </div>
     <div id="inboxbanner"></div>
+    <div id="backupbanner"></div>
     <div id="filterpanel" class="filterpanel" ${filtersOpen ? "" : "hidden"}>
       <div id="facets">
         ${COMPACT_FACETS.map(([key, label]) => !opts[key].length ? "" : `
@@ -1170,6 +1326,7 @@ function renderList() {
     <div id="results" class="results"></div>`;
 
   renderInboxBanner();
+  renderBackupBanner();
 
   // "More filters" pickers reuse the combobox over values actually in use.
   const moreBox = $("#morefilters");
@@ -1411,9 +1568,14 @@ function badgesHTML(m) {
   return b.length ? `<div class="badges">${b.join("")}</div>` : "";
 }
 
+function materialNeedsRevision(m) {
+  return (m.usage || []).some(u => u.needs_revision);
+}
+
 function cardHTML(m, i) {
   const skills = (m.skills || []).map(s =>
     `<span class="badge">${esc(s)}</span>`).join("");
+  const needsRev = materialNeedsRevision(m);
   const foot = [];
   if (m.duration_min) foot.push(`<span>${icon("clock")}${m.duration_min} min</span>`);
   const nFiles = (m.files || []).length;
@@ -1437,6 +1599,7 @@ function cardHTML(m, i) {
       <div class="card-title">${highlight(m.title, filters.q)}</div>
       ${badgesHTML(m)}
       ${skills ? `<div class="badges">${skills}</div>` : ""}
+      ${needsRev ? `<div class="badges"><span class="revbadge">${icon("alert")}Needs revision</span></div>` : ""}
       ${foot.length ? `<div class="card-foot">${foot.join("")}</div>` : ""}
     </div>
     ${icon("chevron", "card-chev")}
@@ -1458,6 +1621,27 @@ function renderNeeds() {
 }
 
 // ---- detail view ----
+// A teaching-log row, with the Feature-A reflection: stars, italic note,
+// and a red "Needs revision" badge. `i` is the entry's index in m.usage.
+function usageRowHTML(u, i) {
+  const decorated = u.rating || u.reflection || u.needs_revision;
+  return `<div class="filerow usagerow">
+    <span class="ftile ft-use">${icon("circlecheck")}</span>
+    <span class="fcol">
+      <span class="fname">${esc(fmtDate(u.date))}${u.group ? ` — ${esc(u.group)}` : ""}${
+        u.rating ? " " + starsHTML(u.rating) : ""}${
+        u.needs_revision ? ` <span class="revbadge">${icon("alert")}Needs revision</span>` : ""}</span>
+      ${u.note ? `<span class="fnotetext">${esc(u.note)}</span>` : ""}
+      ${u.reflection ? `<span class="reflectext">${esc(u.reflection)}</span>` : ""}
+    </span>
+    <button type="button" class="fsharebtn iconbtn" data-reflect="${i}"
+            aria-label="${decorated ? "Edit" : "Add"} reflection"
+            title="${decorated ? "Edit reflection" : "Add reflection"}">${icon("star")}</button>
+    <button type="button" class="fsharebtn iconbtn" data-unlog="${i}"
+            aria-label="Remove this log entry" title="Remove entry">${icon("x")}</button>
+  </div>`;
+}
+
 function renderDetail(id) {
   const m = DB.lessons.find(x => x.id === id);
   if (!m) {
@@ -1542,6 +1726,10 @@ function renderDetail(id) {
                     aria-pressed="${fileLayout === "grid"}" aria-label="Grid view"
                     title="Grid view">${icon("grid")}</button>
           </div>
+          ${(m.files || []).some(isAnswerKey) ? `<button type="button" id="hidekeysbtn"
+            class="iconbtn keytoggle ${hideKeys ? "on" : ""}" aria-pressed="${hideKeys}"
+            aria-label="${hideKeys ? "Show" : "Hide"} answer keys"
+            title="${hideKeys ? "Show" : "Hide"} answer keys">${icon("circlecheck")}</button>` : ""}
           ${m.files.length > 1 ? `<button type="button" id="reorderbtn"
             class="iconbtn reordertoggle" aria-pressed="false"
             aria-label="Reorder files" title="Reorder files">${icon("grip")}</button>` : ""}
@@ -1550,16 +1738,9 @@ function renderDetail(id) {
       ${usage.length ? `
         <h3 class="section-title">${icon("history")}Teaching log (${usage.length})</h3>
         <div class="filelist" id="usagelist">
-          ${usage.map((u, i) => `
-            <div class="filerow usagerow">
-              <span class="ftile ft-use">${icon("circlecheck")}</span>
-              <span class="fcol">
-                <span class="fname">${esc(fmtDate(u.date))}${u.group ? ` — ${esc(u.group)}` : ""}</span>
-                ${u.note ? `<span class="fnotetext">${esc(u.note)}</span>` : ""}
-              </span>
-              <button type="button" class="fsharebtn iconbtn" data-unlog="${i}"
-                      aria-label="Remove this log entry" title="Remove entry">${icon("x")}</button>
-            </div>`).join("")}
+          ${usage.map((u, i) => ({ u, i }))
+            .sort((a, b) => (b.u.date || "").localeCompare(a.u.date || ""))
+            .map(({ u, i }) => usageRowHTML(u, i)).join("")}
         </div>` : ""}
       <div class="detail-actions">
         <a class="btn primary" href="#/edit/${encodeURIComponent(m.id)}">${icon("pencil")}<span>Edit</span></a>
@@ -1573,6 +1754,7 @@ function renderDetail(id) {
       ${fileTileHTML(f.name, m.id)}
       <span class="fcol">
         <span class="fname">${esc(f.name)}</span>
+        ${f.role ? `<span class="frole">${icon(roleIcon(f.role))}${esc(f.role)}</span>` : ""}
         ${f.note ? `<span class="fnotetext">${esc(f.note)}</span>` : ""}
       </span>
       <span class="fsize">${fmtSize(f.size)}</span>`;
@@ -1580,11 +1762,16 @@ function renderDetail(id) {
       ? `<button type="button" class="fmain" data-img="${esc(f.name)}">${inner}</button>`
       : `<a class="fmain" target="_blank" rel="noopener"
             href="${fileURL(m.id, f.name)}">${inner}</a>`;
-    return `<div class="filerow">${main}
-      <button type="button" class="fsharebtn iconbtn" data-edit="${esc(f.name)}"
-              aria-label="Rename or note ${esc(f.name)}" title="Rename / note">${icon("pencil")}</button>
-      <button type="button" class="fsharebtn iconbtn" data-share="${esc(f.name)}"
-              aria-label="Share ${esc(f.name)}" title="Share">${icon("share")}</button>
+    return `<div class="filerowwrap">
+      <div class="filerow">${main}
+        <button type="button" class="fsharebtn iconbtn" data-edit="${esc(f.name)}"
+                aria-label="Edit ${esc(f.name)}" title="Rename / role / note">${icon("pencil")}</button>
+        <button type="button" class="fsharebtn iconbtn" data-share="${esc(f.name)}"
+                aria-label="Share ${esc(f.name)}" title="Share">${icon("share")}</button>
+      </div>
+      ${f.transcript ? `<details class="ftranscript">
+        <summary>${icon("music")}<span>Transcript</span></summary>
+        <div class="ftranscripttext">${esc(f.transcript)}</div></details>` : ""}
     </div>`;
   }
 
@@ -1609,7 +1796,8 @@ function renderDetail(id) {
     const ext = fileExtLabel(f.name);
     const inner = `${thumb}
       ${ext ? `<span class="ftype">${esc(ext)}</span>` : ""}
-      <span class="fname">${esc(f.name)}</span>`;
+      <span class="fname">${esc(f.name)}</span>
+      ${f.role ? `<span class="frole">${icon(roleIcon(f.role))}${esc(f.role)}</span>` : ""}`;
     const main = isImg
       ? `<button type="button" class="fcmain" data-img="${esc(f.name)}">${inner}</button>`
       : `<a class="fcmain" target="_blank" rel="noopener"
@@ -1638,14 +1826,18 @@ function renderDetail(id) {
            fileReorderRowHTML(f, i, all.length)).join("")}</div>`;
       return;
     }
-    const files = (m.files || []).filter(f =>
+    let files = (m.files || []).filter(f =>
       kindSel === "all" || fileKind(f.name) === kindSel);
+    const hidden = hideKeys ? files.filter(isAnswerKey).length : 0;
+    if (hideKeys) files = files.filter(f => !isAnswerKey(f));
+    const hint = hidden ? `<p class="keyshint">${icon("circlecheck")}${hidden}
+      answer key${hidden === 1 ? "" : "s"} hidden</p>` : "";
     if (!files.length) {
-      wrap.innerHTML = `<p class="empty">No matching files.</p>`;
+      wrap.innerHTML = hint + `<p class="empty">No matching files.</p>`;
     } else if (fileLayout === "grid") {
-      wrap.innerHTML = `<div class="filegrid">${files.map(fileCardHTML).join("")}</div>`;
+      wrap.innerHTML = hint + `<div class="filegrid">${files.map(fileCardHTML).join("")}</div>`;
     } else {
-      wrap.innerHTML = `<div class="filelist">${files.map(fileRowHTML).join("")}</div>`;
+      wrap.innerHTML = hint + `<div class="filelist">${files.map(fileRowHTML).join("")}</div>`;
     }
   }
   renderFiles();
@@ -1722,6 +1914,18 @@ function renderDetail(id) {
       renderFiles();
     });
   }
+  const hideKeysBtn = $("#hidekeysbtn");
+  if (hideKeysBtn) {
+    hideKeysBtn.addEventListener("click", () => {
+      hideKeys = !hideKeys;
+      lsSet("mlib-hide-keys", hideKeys ? "1" : "0");
+      hideKeysBtn.classList.toggle("on", hideKeys);
+      hideKeysBtn.setAttribute("aria-pressed", hideKeys);
+      hideKeysBtn.title = (hideKeys ? "Show" : "Hide") + " answer keys";
+      hideKeysBtn.setAttribute("aria-label", hideKeysBtn.title);
+      renderFiles();
+    });
+  }
   const reorderBtn = $("#reorderbtn");
   if (reorderBtn) {
     reorderBtn.addEventListener("click", () => {
@@ -1758,14 +1962,28 @@ function renderDetail(id) {
       if (!res) return;
       if (res.remove) { await removeFile(file); return; }
       try {
+        const body = { old: file.name, name: res.name, note: res.note };
+        if (res.role !== undefined) body.role = res.role;
+        if (res.transcript !== undefined) body.transcript = res.transcript;
         const out = await api("/api/lessons/" + encodeURIComponent(m.id) + "/files/edit",
-          { method: "POST", body: formBody({ old: file.name, name: res.name, note: res.note }) });
+          { method: "POST", body: formBody(body) });
         if (out.lesson) replaceMaterial(out.lesson);
         renderDetail(m.id);
-        toast(out.old === out.new ? "Note saved" : "Renamed to " + out.new);
+        toast(out.old === out.new ? "File updated" : "Renamed to " + out.new);
       } catch (err) {
         toast("Could not save: " + err.message, "error");
       }
+      return;
+    }
+    const reflect = e.target.closest("[data-reflect]");
+    if (reflect) {
+      const i = +reflect.dataset.reflect;
+      const u = (m.usage || [])[i];
+      if (!u) return;
+      const ok = await reflectOnEntry(m, i, {
+        editing: true, rating: u.rating || 0,
+        reflection: u.reflection || "", needs_revision: !!u.needs_revision });
+      if (ok) renderDetail(m.id);
       return;
     }
     const unlog = e.target.closest("[data-unlog]");
@@ -1842,6 +2060,39 @@ function planMinutes(p, mats) {
 const PLACEHOLDER_KINDS = [
   ["Warmer", "flame"], ["Break", "coffee"], ["Cool-down", "wind"],
 ];
+
+/* ---- run-mode timer helpers (Feature B) ---- */
+function fmtClock(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+}
+
+// Default seconds for an item's timer: a material's duration_min, a stage's
+// plan-level default (stage_durations) or the item's own duration, else 5 min.
+function runItemDefaultSecs(it, mats, p) {
+  if (it.placeholder) {
+    const key = String(it.placeholder).toLowerCase();
+    const mins = it.duration_min ||
+      (p.stage_durations && p.stage_durations[key]) || 5;
+    return mins * 60;
+  }
+  const m = mats.get(it.material_id);
+  return ((m && m.duration_min) || 5) * 60;
+}
+
+function splitNames(text) {
+  return String(text || "").split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+}
+
+function shuffled(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
 
 function placeholderIcon(label) {
   const hit = PLACEHOLDER_KINDS.find(([l]) =>
@@ -1939,9 +2190,12 @@ async function setPlanItemDone(p, i, done, mats) {
   const planNote = "Plan: " + p.title;
   try {
     if (done) {
-      await postUsage(m.id, { date: todayISO(), group: p.group || "",
-                              note: planNote });
-      toast(`Done — logged in the teaching log of “${m.title}”`);
+      const rec = await postUsage(m.id, { date: todayISO(),
+                                          group: p.group || "", note: planNote });
+      const idx = (rec.usage || []).length - 1;
+      toast(`Done — logged in “${m.title}”`, "ok", { actions: [
+        { label: "Reflect", onClick: () => reflectOnEntry(rec, idx) },
+      ] });
     } else {
       const fresh = DB.lessons.find(x => x.id === m.id);
       const idx = (fresh.usage || []).map((u, j) => [u, j])
@@ -2287,14 +2541,103 @@ function renderRun(id) {
   let cur = p.items.findIndex(it => !it.done);
   if (cur < 0) cur = 0;
 
+  // run-session-only state, intentionally lost when leaving run mode
+  const timers = new Map();   // item object -> {remaining, running, auto, started}
+  let panelOpen = false;      // timer panel expanded inline?
+  let jumpQ = "";             // quick-jump search text
+  let pickAnim = null;        // picker "spin" interval, cleared on close
+  const picker = { names: [], excluded: new Set(), teams: 4, tab: "one" };
+
+  function timerFor(it) {
+    let t = timers.get(it);
+    if (!t) {
+      t = { remaining: runItemDefaultSecs(it, mats, p), running: false,
+            auto: false, started: false };
+      timers.set(it, t);
+    }
+    return t;
+  }
+  function timerTone(t) {
+    if (t.remaining <= 0) return "danger";
+    if (t.remaining <= 120) return "warn";
+    return "";
+  }
+  function syncTimer() {
+    const t = timerFor(p.items[cur]);
+    const tone = timerTone(t);
+    const chip = $("#timerchip");
+    if (chip) {
+      chip.className = "timerchip " + tone;
+      $("#timerchipval", chip).textContent = t.started ? fmtClock(t.remaining) : "--:--";
+    }
+    const disp = $("#timerdisp");
+    if (disp) { disp.textContent = fmtClock(t.remaining); disp.className = "timerdisp " + tone; }
+    const sb = $("#tm-start");
+    if (sb) sb.innerHTML = icon(t.running ? "timer" : "play") +
+      `<span>${t.running ? "Pause" : "Start"}</span>`;
+    const ab = $("#tm-auto");
+    if (ab) { ab.classList.toggle("on", t.auto); ab.setAttribute("aria-pressed", String(t.auto)); }
+  }
+  function tick() {
+    const t = timerFor(p.items[cur]);
+    if (!t.running) { stopRunTicker(); return; }
+    t.remaining -= 1;
+    if (t.remaining <= 0) {
+      t.remaining = 0; t.running = false; stopRunTicker(); syncTimer();
+      if (t.auto) advance(1);   // auto-advance; item is NOT auto-marked done
+      return;
+    }
+    syncTimer();
+  }
+  function pauseCurrent() {
+    const t = timers.get(p.items[cur]);
+    if (t) t.running = false;
+    stopRunTicker();
+  }
+  function advance(dir) {
+    pauseCurrent();
+    const ni = cur + dir;
+    if (ni < 0 || ni >= p.items.length) return;
+    cur = ni; panelOpen = false; paint();
+  }
+
+  function jumpResultsHTML() {
+    const q = jumpQ.trim().toLowerCase();
+    if (!q) return "";
+    const hits = DB.lessons.filter(m => searchHay(m).includes(q)).slice(0, 8);
+    return `<div class="jumpresults">${hits.length ? hits.map(m => `
+      <button type="button" class="jumprow" data-jump="${esc(m.id)}">
+        <span class="jumptitle">${esc(m.title)}</span>
+        <span class="jumpmeta">${(m.cefr_levels || []).map(lv =>
+          `<span class="badge ${cefrClass(lv)}">${esc(lv)}</span>`).join("")}
+          ${icon(materialIcon(m), "jumpfmt")}</span>
+      </button>`).join("") : `<div class="jumpnone">No materials match.</div>`}</div>`;
+  }
+
+  function timerPanelHTML(t) {
+    return `<div class="timerpanel" id="timerpanel">
+      <div class="timerdisp ${timerTone(t)}" id="timerdisp">${fmtClock(t.remaining)}</div>
+      <div class="timerbtns">
+        <button type="button" class="btn" id="tm-minus" aria-label="Subtract one minute">−1:00</button>
+        <button type="button" class="btn primary" id="tm-start">${icon(t.running ? "timer" : "play")}<span>${t.running ? "Pause" : "Start"}</span></button>
+        <button type="button" class="btn" id="tm-plus" aria-label="Add one minute">+1:00</button>
+      </div>
+      <div class="timerbtns">
+        <button type="button" class="btn" id="tm-reset">${icon("rescan")}<span>Reset</span></button>
+        <button type="button" class="chip toggle ${t.auto ? "on" : ""}" id="tm-auto"
+                aria-pressed="${t.auto}">${icon("chevron")}<span>Auto-advance at 0:00</span></button>
+      </div>
+    </div>`;
+  }
+
   function stepHTML() {
     const it = p.items[cur];
+    const t = timerFor(it);
     const { total, done } = planProgress(p);
     const m = it.placeholder ? null : mats.get(it.material_id);
     const body = it.placeholder ? `
       <span class="runtile">${icon(placeholderIcon(it.placeholder))}</span>
-      <h2>${esc(it.placeholder)}</h2>
-      ${it.duration_min ? `<div class="metaline center"><span>${icon("clock")}${it.duration_min} min</span></div>` : ""}`
+      <h2>${esc(it.placeholder)}</h2>`
     : m ? `
       ${heroThumbHTML(m)}
       <h2>${esc(m.title)}</h2>
@@ -2304,22 +2647,44 @@ function renderRun(id) {
         ${m.files.length ? `<span>${icon("file")}${m.files.length} file${m.files.length === 1 ? "" : "s"}</span>` : ""}
       </div>
       ${m.notes ? `<div class="notecallout"><span class="notelabel">Notes</span>${esc(m.notes)}</div>` : ""}
-      ${m.files.length ? `<div class="runfiles">${m.files.slice(0, 6).map(f => `
-        <a class="chip" target="_blank" rel="noopener" href="${fileURL(m.id, f.name)}">
-          ${icon("external", "chip-ic-plus")}<span>${esc(f.name)}</span></a>`).join("")}
-      </div>` : ""}`
+      ${(() => {
+        // in class the teacher projects this; honor "Hide answer keys"
+        const rf = (m.files || []).filter(f => !(hideKeys && isAnswerKey(f)));
+        return rf.length ? `<div class="runfiles">${rf.slice(0, 6).map(f => `
+          <a class="chip" target="_blank" rel="noopener" href="${fileURL(m.id, f.name)}">
+            ${icon(f.role ? roleIcon(f.role) : "external", "chip-ic-plus")}<span>${esc(f.name)}</span></a>`).join("")}
+        </div>` : "";
+      })()}`
     : `
       <span class="runtile">${icon("alert")}</span>
       <h2>${esc(it.material_id)}</h2>
       <p class="hint">This material is missing — renamed or deleted?</p>`;
     return `
       <a class="back" href="#/plan/${encodeURIComponent(p.id)}">${icon("back")}Exit class mode</a>
+      <div class="searchwrap runjump">
+        <div class="searchbox">
+          ${icon("search")}
+          <input id="runjumpq" type="search" autocomplete="off" enterkeyhint="search"
+                 aria-label="Search library to insert a side-track"
+                 placeholder="Search library to insert…" value="${esc(jumpQ)}">
+        </div>
+        ${jumpResultsHTML()}
+      </div>
       <div class="runhead">
         <span class="runcount">${cur + 1} of ${total}</span>
         <div class="progressbar"><span style="width:${(done / total) * 100}%"></span></div>
       </div>
-      <div class="runcard${it.done ? " done" : ""}">${body}
+      <div class="runcard${it.done ? " done" : ""}">
+        <div class="runcardtop">
+          ${it.side_track ? `<span class="sidetrack">${icon("shuffle")}Side-track</span>` : "<span></span>"}
+          <button type="button" class="timerchip ${timerTone(t)}" id="timerchip"
+                  aria-label="Timer">${icon("timer")}<span id="timerchipval">${t.started ? fmtClock(t.remaining) : "--:--"}</span></button>
+          ${it.side_track ? `<button type="button" class="iconbtn small" id="runremove"
+                  aria-label="Remove side-track">${icon("x")}</button>` : "<span></span>"}
+        </div>
+        ${body}
         ${it.done ? `<div class="rundone">${icon("circlecheck")}Done</div>` : ""}
+        ${panelOpen ? timerPanelHTML(t) : ""}
       </div>
       <div class="runctrls">
         <button id="runprev" class="btn big" type="button" ${cur === 0 ? "disabled" : ""}
@@ -2328,10 +2693,176 @@ function renderRun(id) {
           ${icon(it.done ? "circle" : "check")}<span>${it.done ? "Not done" : "Done"}</span></button>
         <button id="runnext" class="btn big" type="button" ${cur === p.items.length - 1 ? "disabled" : ""}
                 aria-label="Next item">${icon("chevron")}</button>
-      </div>`;
+      </div>
+      <button type="button" id="runpickbtn" class="runpick"
+              aria-label="Random picker">${icon("hand")}<span>Pick</span></button>`;
+  }
+
+  // ---- random student / team picker (in-memory, no roster, no logging) ----
+  function openPicker() {
+    let dlg = $("#runpickerdlg");
+    if (!dlg) {
+      dlg = document.createElement("dialog");
+      dlg.id = "runpickerdlg";
+      dlg.className = "dlg formdlg pickerdlg";
+      document.body.appendChild(dlg);
+    }
+    function bodyHTML() {
+      if (picker.tab === "teams") {
+        return `<label class="field"><span>Number of teams</span>
+            <input type="number" id="pk-teams" min="2" max="12" value="${picker.teams}"></label>
+          <button type="button" id="pk-shuffle" class="btn primary big wide">${icon("shuffle")}<span>Shuffle</span></button>
+          <div id="pk-teamsout" class="pk-teams"></div>`;
+      }
+      return `<button type="button" id="pk-pick" class="btn primary big wide">${icon("hand")}<span>Pick</span></button>
+        <div id="pk-result" class="pk-result"></div>
+        <button type="button" id="pk-reset" class="btn wide" ${picker.excluded.size ? "" : "disabled"}>Reset</button>`;
+    }
+    function paintPicker() {
+      dlg.innerHTML = `
+        <div class="pickertabs" role="tablist">
+          <button type="button" class="ptab ${picker.tab === "one" ? "on" : ""}" data-tab="one">Pick one</button>
+          <button type="button" class="ptab ${picker.tab === "teams" ? "on" : ""}" data-tab="teams">Make teams</button>
+        </div>
+        <textarea id="pk-names" class="pk-names" rows="3"
+          placeholder="Type or paste names — one per line">${esc(picker.names.join("\n"))}</textarea>
+        <div class="pk-count">${picker.names.length} name${picker.names.length === 1 ? "" : "s"}</div>
+        <div id="pk-body">${bodyHTML()}</div>
+        <div class="dlg-actions"><button type="button" id="pk-close" class="btn">Close</button></div>`;
+      wire();
+    }
+    function pickOne() {
+      const pool = picker.names.filter(n => !picker.excluded.has(n));
+      const res = $("#pk-result");
+      if (!pool.length) {
+        res.textContent = picker.names.length
+          ? "Everyone's had a turn — tap Reset to go again." : "Add some names first.";
+        return;
+      }
+      const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const land = () => {
+        const chosen = pool[Math.floor(Math.random() * pool.length)];
+        picker.excluded.add(chosen);
+        res.innerHTML = `<span class="pk-name landed">${esc(chosen)}</span>`;
+        const rb = $("#pk-reset"); if (rb) rb.disabled = false;
+      };
+      if (reduce) { land(); return; }
+      let ticks = 0;
+      if (pickAnim) clearInterval(pickAnim);
+      pickAnim = setInterval(() => {
+        res.innerHTML = `<span class="pk-name spin">${esc(pool[Math.floor(Math.random() * pool.length)])}</span>`;
+        if (++ticks >= 12) { clearInterval(pickAnim); pickAnim = null; land(); }
+      }, 80);
+    }
+    function shuffleTeams() {
+      const n = Math.max(2, Math.min(12, parseInt($("#pk-teams").value, 10) || 4));
+      picker.teams = n;
+      const names = shuffled(picker.names);
+      const out = $("#pk-teamsout");
+      if (!names.length) { out.innerHTML = `<p class="hint">Add some names first.</p>`; return; }
+      const teams = Array.from({ length: n }, () => []);
+      names.forEach((nm, i) => teams[i % n].push(nm));
+      out.innerHTML = teams.map((t, i) => `<div class="pk-team">
+        <div class="pk-teamhead">Team ${i + 1}</div>
+        ${t.map(nm => `<div class="pk-member">${esc(nm)}</div>`).join("")}</div>`).join("");
+    }
+    function wire() {
+      $$(".ptab", dlg).forEach(b => b.addEventListener("click", () => {
+        picker.tab = b.dataset.tab; paintPicker();
+      }));
+      $("#pk-names", dlg).addEventListener("input", e => {
+        picker.names = splitNames(e.target.value);
+        picker.excluded = new Set([...picker.excluded].filter(n => picker.names.includes(n)));
+        const c = $(".pk-count", dlg);
+        if (c) c.textContent = picker.names.length + " name" + (picker.names.length === 1 ? "" : "s");
+      });
+      const pick = $("#pk-pick"); if (pick) pick.addEventListener("click", pickOne);
+      const reset = $("#pk-reset"); if (reset) reset.addEventListener("click", () => {
+        picker.excluded.clear(); $("#pk-result").textContent = ""; reset.disabled = true;
+      });
+      const sh = $("#pk-shuffle"); if (sh) sh.addEventListener("click", shuffleTeams);
+      $("#pk-close", dlg).addEventListener("click", () => {
+        if (pickAnim) { clearInterval(pickAnim); pickAnim = null; }
+        dlg.close();
+      });
+    }
+    paintPicker();
+    if (!openDialog(dlg)) { /* no dialog support: nothing else to do */ }
+  }
+
+  function wireStep() {
+    $("#runprev").addEventListener("click", () => advance(-1));
+    $("#runnext").addEventListener("click", () => advance(1));
+    $("#rundone").addEventListener("click", async () => {
+      const marking = !p.items[cur].done;
+      await setPlanItemDone(p, cur, marking, mats);
+      if (marking) {
+        const next = p.items.findIndex((it, i) => i > cur && !it.done);
+        if (next >= 0) { pauseCurrent(); cur = next; panelOpen = false; }
+      }
+      paint();
+    });
+    $("#timerchip").addEventListener("click", () => { panelOpen = !panelOpen; paint(); });
+    $("#runpickbtn").addEventListener("click", openPicker);
+
+    const remove = $("#runremove");
+    if (remove) remove.addEventListener("click", () => {
+      timers.delete(p.items[cur]);
+      p.items.splice(cur, 1);
+      if (!p.items.length) { location.hash = "#/plan/" + encodeURIComponent(p.id); return; }
+      if (cur >= p.items.length) cur = p.items.length - 1;
+      panelOpen = false; paint();
+      toast("Side-track removed");
+    });
+
+    // quick-jump
+    const jq = $("#runjumpq");
+    jq.addEventListener("input", e => {
+      jumpQ = e.target.value;
+      const wrap = $(".runjump");
+      const old = $(".jumpresults", wrap);
+      if (old) old.remove();
+      wrap.insertAdjacentHTML("beforeend", jumpResultsHTML());
+    });
+    $(".runjump").addEventListener("click", e => {
+      const row = e.target.closest("[data-jump]");
+      if (!row) return;
+      const m = DB.lessons.find(x => x.id === row.dataset.jump);
+      if (!m) return;
+      pauseCurrent();
+      p.items.splice(cur, 0, { material_id: m.id, done: false, note: "", side_track: true });
+      jumpQ = ""; panelOpen = false; paint();
+      toast(`Inserted “${m.title}” — save the plan to keep it`);
+    });
+
+    // timer panel controls
+    const start = $("#tm-start");
+    if (start) {
+      const t = timerFor(p.items[cur]);
+      start.addEventListener("click", () => {
+        if (t.running) { t.running = false; stopRunTicker(); }
+        else {
+          if (t.remaining <= 0) t.remaining = runItemDefaultSecs(p.items[cur], mats, p);
+          t.running = true; t.started = true; stopRunTicker(); _runTicker = setInterval(tick, 1000);
+        }
+        syncTimer();
+      });
+      $("#tm-reset").addEventListener("click", () => {
+        t.running = false; t.started = false; stopRunTicker();
+        t.remaining = runItemDefaultSecs(p.items[cur], mats, p); syncTimer();
+      });
+      $("#tm-minus").addEventListener("click", () => {
+        t.remaining = Math.max(0, t.remaining - 60); t.started = true; syncTimer();
+      });
+      $("#tm-plus").addEventListener("click", () => {
+        t.remaining += 60; t.started = true; syncTimer();
+      });
+      $("#tm-auto").addEventListener("click", () => { t.auto = !t.auto; syncTimer(); });
+    }
   }
 
   function paint() {
+    stopRunTicker();
     if ((p.items || []).every(it => it.done)) {
       const mins = planMinutes(p, mats);
       view.innerHTML = `
@@ -2346,21 +2877,11 @@ function renderRun(id) {
       return;
     }
     view.innerHTML = stepHTML();
-    $("#runprev").addEventListener("click", () => {
-      if (cur > 0) { cur--; paint(); }
-    });
-    $("#runnext").addEventListener("click", () => {
-      if (cur < p.items.length - 1) { cur++; paint(); }
-    });
-    $("#rundone").addEventListener("click", async () => {
-      const marking = !p.items[cur].done;
-      await setPlanItemDone(p, cur, marking, mats);
-      if (marking) {
-        const next = p.items.findIndex((it, i) => i > cur && !it.done);
-        if (next >= 0) cur = next;
-      }
-      paint();
-    });
+    wireStep();
+    // a running timer survives a repaint (insert/toggle); resume its ticking
+    const t = timers.get(p.items[cur]);
+    if (t && t.running) { stopRunTicker(); _runTicker = setInterval(tick, 1000); }
+    syncTimer();
   }
   paint();
 }
@@ -2651,6 +3172,77 @@ function renderInbox() {
   }
 }
 
+// ---- reflections feed (Feature A) ----
+let reflectFilter = "all";   // "all" | "needs" | "low"
+
+async function renderReflections() {
+  view.innerHTML = `<h2 class="pagetitle">Reflections</h2>
+    <div class="skel row"></div><div class="skel row"></div>`;
+  let feed;
+  try {
+    feed = (await api("/api/reflections")).reflections || [];
+  } catch (err) {
+    view.innerHTML = `<h2 class="pagetitle">Reflections</h2>
+      <p class="empty">Could not load reflections: ${esc(err.message)}</p>`;
+    return;
+  }
+  if (route().view !== "reflections") return;  // navigated away meanwhile
+
+  const counts = {
+    all: feed.length,
+    needs: feed.filter(r => r.needs_revision).length,
+    low: feed.filter(r => r.rating && r.rating <= 2).length,
+  };
+  const CHIPS = [["all", "All"], ["needs", "Needs revision"], ["low", "1★–2★"]];
+
+  function shown() {
+    if (reflectFilter === "needs") return feed.filter(r => r.needs_revision);
+    if (reflectFilter === "low") return feed.filter(r => r.rating && r.rating <= 2);
+    return feed;
+  }
+
+  function rowHTML(r) {
+    return `<a class="card reflectrow" href="#/lesson/${encodeURIComponent(r.material_id)}">
+      <div class="card-body">
+        <div class="reflecthead">
+          <span class="reflectdate">${esc(fmtDate(r.date))}</span>
+          ${r.rating ? starsHTML(r.rating) : ""}
+          ${r.needs_revision ? `<span class="revbadge">${icon("alert")}Needs revision</span>` : ""}
+        </div>
+        <div class="card-title">${esc(r.material_name)}</div>
+        ${r.group ? `<div class="card-foot"><span>${icon("users")}${esc(r.group)}</span></div>` : ""}
+        ${r.reflection ? `<div class="reflectext">${esc(r.reflection)}</div>` : ""}
+      </div>
+      ${icon("chevron", "card-chev")}
+    </a>`;
+  }
+
+  function paint() {
+    const rows = shown();
+    view.innerHTML = `
+      <h2 class="pagetitle">Reflections</h2>
+      <p class="hint pagehint">How your materials went in class — tap one to open it.</p>
+      <div class="chips reflectchips" id="reflectchips">
+        ${CHIPS.map(([k, label]) => `<button type="button"
+          class="chip${reflectFilter === k ? " on" : ""}" data-rf="${k}"
+          aria-pressed="${reflectFilter === k}"><span>${label}</span>
+          <span class="fcount">${counts[k]}</span></button>`).join("")}
+      </div>
+      ${rows.length ? `<div class="results">${rows.map(rowHTML).join("")}</div>`
+        : `<div class="emptystate">${emptyArt()}<h3>Nothing here yet</h3>
+            <p>${reflectFilter === "all"
+              ? "Rate and reflect after a class: in class mode tap Done then Reflect, or use the ★ on any teaching-log entry."
+              : "No entries match this filter."}</p></div>`}`;
+    $("#reflectchips").addEventListener("click", e => {
+      const c = e.target.closest("[data-rf]");
+      if (!c || c.dataset.rf === reflectFilter) return;
+      reflectFilter = c.dataset.rf;
+      paint();
+    });
+  }
+  paint();
+}
+
 // ---- health view ----
 async function renderHealth() {
   view.innerHTML = `<h2 class="pagetitle">Library health</h2>
@@ -2703,6 +3295,20 @@ async function renderHealth() {
           they'll wait here until you attach them.</p>`}
     </div>
 
+    ${h.needs_revision ? `
+    <div class="formcard">
+      <h3>${icon("star")}Reflections</h3>
+      <a class="filerow" href="#/reflections" id="needsrevstat">
+        <span class="ftile ft-use">${icon("alert")}</span>
+        <span class="fcol">
+          <span class="fname">${h.needs_revision} material${h.needs_revision === 1 ? "" : "s"}
+            need${h.needs_revision === 1 ? "s" : ""} revision</span>
+          <span class="fnotetext">Flagged in a teaching-log reflection</span>
+        </span>
+        ${icon("chevron", "card-chev")}
+      </a>
+    </div>` : ""}
+
     <div class="formcard">
       <h3>${icon("tags")}Tagging gaps</h3>
       ${(h.untagged || []).length ? `
@@ -2720,6 +3326,11 @@ async function renderHealth() {
       : `<p class="hint">Every material has a level, skills, format, and topics. Nice.</p>`}
     </div>
 
+    <div class="formcard" id="health-backup">
+      <h3>${icon("cloud")}Backup</h3>
+      <p class="hint">Loading backup status…</p>
+    </div>
+
     <div class="formcard">
       <h3>${icon("trash")}Trash</h3>
       ${(h.trash || []).length ? `
@@ -2731,6 +3342,34 @@ async function renderHealth() {
           ${icon("trash")}<span>Empty Trash permanently</span></button>`
       : `<p class="hint">Trash is empty.</p>`}
     </div>`;
+
+  const nrs = $("#needsrevstat");
+  if (nrs) nrs.addEventListener("click", () => { reflectFilter = "needs"; });
+
+  // backup status card (async — fills in once /api/backup/status resolves)
+  refreshBackupInfo().then(() => {
+    const card = $("#health-backup");
+    if (!card || route().view !== "health") return;
+    const info = backupInfo;
+    card.innerHTML = `<h3>${icon("cloud")}Backup</h3>` + (info.configured ? `
+      <div class="bkstat"><span class="bkdot ${info.is_due ? "due" : "ok"}"></span>
+        <span>${info.last_backup_at
+          ? "Last backup " + esc(relDate(info.last_backup_at)) +
+            (info.last_backup_size_bytes ? " · " + fmtSize(info.last_backup_size_bytes) : "")
+          : "Never backed up yet"}</span></div>
+      ${(info.materials_added_since_last_backup || 0)
+        ? `<p class="hint">${info.materials_added_since_last_backup} material(s) added since the last backup.</p>` : ""}
+      <div class="bkrow">
+        <button id="hb-now" class="btn primary" type="button">${icon("cloudup")}<span>Back up now</span></button>
+        <button id="hb-restore" class="btn" type="button">${icon("cloud")}<span>Restore…</span></button>
+      </div>`
+    : `<p class="hint">Not set up yet — keep your library safe on Drive.</p>
+       <a class="btn wide" href="#/settings">${icon("cloud")}<span>Set up backup</span></a>`);
+    const hbnow = $("#hb-now");
+    if (hbnow) hbnow.addEventListener("click", async () => { await doBackupNow(); renderHealth(); });
+    const hbr = $("#hb-restore");
+    if (hbr) hbr.addEventListener("click", openRestore);
+  });
 
   const emptyBtn = $("#emptytrash");
   if (emptyBtn) {
@@ -2752,6 +3391,299 @@ async function renderHealth() {
       }
     });
   }
+}
+
+// ---- backup & restore (Feature E) ----
+// The only feature that can reach a network, and only via a destination the
+// teacher explicitly configured. backupInfo caches /api/backup/status so the
+// home banner and settings stay in sync without refetching constantly.
+let backupInfo = null;
+let backupDismissed = false;   // reminder banner dismissed this session
+
+function onAndroid() {
+  return !!(window.MLBridge && typeof MLBridge.pickBackupFolder === "function");
+}
+
+async function refreshBackupInfo() {
+  try {
+    const res = await fetch("/api/backup/status");
+    backupInfo = res.ok ? await res.json() : { configured: false };
+  } catch (e) {
+    backupInfo = { configured: false };
+  }
+  return backupInfo;
+}
+
+async function putBackupConfig(patch) {
+  const out = await api("/api/backup/config", {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch) });
+  backupInfo = out;
+  return out;
+}
+
+// Android calls this back from the SAF folder picker (see MainActivity).
+window.onBackupFolderPicked = function (uri) {
+  if (!uri) return;
+  putBackupConfig({ destination_type: "saf", destination_uri: uri })
+    .then(() => { toast("Backup folder connected"); if (route().view === "settings") renderSettings(); })
+    .catch(err => toast("Could not connect: " + err.message, "error"));
+};
+
+async function doBackupNow() {
+  if (!backupInfo || !backupInfo.configured) {
+    toast("Set up a backup destination first");
+    location.hash = "#/settings";
+    return null;
+  }
+  toast("Backing up…", "ok", { duration: 2000 });
+  try {
+    const out = await api("/api/backup/now", { method: "POST", body: formBody({}) });
+    await refreshBackupInfo();
+    toast(`Backed up ${out.material_count} material${out.material_count === 1 ? "" : "s"} · ${fmtSize(out.bytes)}`);
+    return out;
+  } catch (err) {
+    toast("Backup failed: " + err.message, "error");
+    return null;
+  }
+}
+
+function backupReminderText(info) {
+  if (!info.last_backup_at) return "You haven't backed up yet.";
+  if (info.auto_frequency === "after_n_materials" &&
+      (info.materials_added_since_last_backup || 0) >= (info.after_n_value || 0) &&
+      (info.after_n_value || 0) > 0) {
+    return `${info.materials_added_since_last_backup} new materials since your last backup.`;
+  }
+  return `Last backup was ${relDate(info.last_backup_at)}.`;
+}
+
+// Non-blocking reminder on the library home; only when a backup is actually due.
+function renderBackupBanner() {
+  const el = $("#backupbanner");
+  if (!el) return;
+  const info = backupInfo;
+  const due = info && info.configured && info.is_due && !backupDismissed;
+  if (!due) { el.innerHTML = ""; return; }
+  el.innerHTML = `<div class="banner static backupbanner">
+    ${icon("cloudup")}
+    <span class="bannertext"><strong>Time to back up</strong> — ${esc(backupReminderText(info))}</span>
+    <span class="bannerbtns">
+      <button type="button" class="textbtn" id="bk-now">Back up now</button>
+      <button type="button" class="textbtn" id="bk-dismiss">Dismiss</button>
+    </span>
+  </div>`;
+  $("#bk-now").addEventListener("click", async () => {
+    await doBackupNow();
+    renderBackupBanner();
+  });
+  $("#bk-dismiss").addEventListener("click", () => {
+    backupDismissed = true;
+    renderBackupBanner();
+  });
+}
+
+// Restore flow: list backups, pick a strategy, confirm. Built on demand.
+async function openRestore() {
+  if (!backupInfo || !backupInfo.configured) { toast("Set up backup first"); return; }
+  let backups;
+  try {
+    backups = (await api("/api/backup/list")).backups || [];
+  } catch (err) {
+    toast("Could not list backups: " + err.message, "error");
+    return;
+  }
+  if (!backups.length) { toast("No backups found in the destination yet"); return; }
+  let dlg = $("#restoredlg");
+  if (!dlg) {
+    dlg = document.createElement("dialog");
+    dlg.id = "restoredlg";
+    dlg.className = "dlg formdlg";
+    document.body.appendChild(dlg);
+  }
+  let picked = backups[0].name;
+  let strategy = "merge_skip";
+  const STRAT = [
+    ["merge_skip", "Merge — keep mine", "Add new materials from the backup; keep my versions of any that clash."],
+    ["merge_overwrite", "Merge — use backup", "Add new materials and replace my versions with the backup's."],
+    ["replace_all", "Replace everything", "Move my current library aside and restore the backup wholesale."],
+  ];
+  function paintRestore() {
+    dlg.innerHTML = `
+      <h2>Restore from backup</h2>
+      <p class="dlg-sub">Your current library is backed up automatically first, so this is undoable.</p>
+      <label class="field"><span>Backup</span>
+        <select id="rs-pick">${backups.map(b =>
+          `<option value="${esc(b.name)}">${esc(b.name.replace(/^lesson-library-backup-/, "").replace(/\.zip$/, ""))}${
+            b.size_bytes ? " · " + fmtSize(b.size_bytes) : ""}</option>`).join("")}</select>
+      </label>
+      <div class="field"><span>How to merge</span>
+        <div class="stratlist">${STRAT.map(([k, label, desc]) =>
+          `<button type="button" class="stratopt ${k === strategy ? "on" : ""}" data-strat="${k}">
+            <span class="stratmark">${icon(k === strategy ? "circlecheck" : "circle")}</span>
+            <span class="stratcol"><span class="strattitle">${esc(label)}</span>
+              <span class="stratdesc">${esc(desc)}</span></span>
+          </button>`).join("")}</div>
+      </div>
+      <div class="dlg-actions">
+        <button type="button" id="rs-cancel" class="btn">Cancel</button>
+        <button type="button" id="rs-go" class="btn primary">Restore</button>
+      </div>`;
+    $("#rs-pick").addEventListener("change", e => { picked = e.target.value; });
+    $$(".stratopt", dlg).forEach(b => b.addEventListener("click", () => {
+      strategy = b.dataset.strat; paintRestore();
+    }));
+    $("#rs-cancel").addEventListener("click", () => dlg.close());
+    $("#rs-go").addEventListener("click", onRestore);
+  }
+  async function onRestore() {
+    const destructive = strategy === "replace_all";
+    const ok = await confirmDialog({
+      title: destructive ? "Replace your whole library?" : "Restore from backup?",
+      message: destructive
+        ? "Your current library moves to a Trash-restore folder first, then the backup is restored. You can undo by moving it back."
+        : "New materials are added from the backup. Your current library is backed up first.",
+      confirmLabel: "Restore",
+    });
+    if (!ok) return;
+    dlg.close();
+    toast("Restoring…", "ok", { duration: 2000 });
+    try {
+      const out = await api("/api/backup/restore", { method: "POST",
+        body: formBody({ backup_name: picked, strategy }) });
+      await refresh();
+      await refreshBackupInfo();
+      render();
+      const parts = [];
+      if (out.restored) parts.push(`${out.restored.length} restored`);
+      if (out.added) parts.push(`${out.added.length} added`);
+      if (out.overwritten && out.overwritten.length) parts.push(`${out.overwritten.length} replaced`);
+      if (out.skipped && out.skipped.length) parts.push(`${out.skipped.length} kept`);
+      let msg = "Restore complete" + (parts.length ? " — " + parts.join(", ") : "");
+      toast(msg);
+      if (out.conflicts && out.conflicts.length) {
+        toast(`${out.conflicts.length} material${out.conflicts.length === 1 ? "" : "s"} differed between devices — review them`, "error", { duration: 8000 });
+      }
+    } catch (err) {
+      toast("Restore failed: " + err.message, "error");
+    }
+  }
+  paintRestore();
+  openDialog(dlg);
+}
+
+function backupDestinationLabel(info) {
+  if (info.destination_type === "saf") return "Cloud folder (Drive / SAF)";
+  if (info.destination_type === "local") return info.destination_path || "Local folder";
+  return "";
+}
+
+function backupSettingsHTML() {
+  const info = backupInfo;
+  if (!info) return `<p class="hint">Checking backup status…</p>`;
+  if (!info.configured) {
+    return `<p class="hint">Keep a copy of your whole library on Google Drive
+      (or any cloud) and restore it on another phone. Nothing leaves your
+      device until you connect a destination.</p>
+      ${onAndroid()
+        ? `<button id="bk-pick" class="btn primary wide" type="button">${icon("cloud")}<span>Choose a Drive folder…</span></button>`
+        : `<label class="field"><span>Backup folder path</span>
+            <input type="text" id="bk-path" autocomplete="off" spellcheck="false"
+                   placeholder="e.g. /sdcard/Download/lesson-backups">
+           </label>
+           <button id="bk-connect" class="btn primary wide" type="button">${icon("cloud")}<span>Connect this folder</span></button>
+           <p class="hint">On Termux/desktop, point this at a folder your own
+             sync tool (rclone, Insync…) keeps on Drive.</p>`}`;
+  }
+  const last = info.last_backup_at
+    ? `Last backup ${relDate(info.last_backup_at)}${info.last_backup_size_bytes ? " · " + fmtSize(info.last_backup_size_bytes) : ""}`
+    : "Never backed up yet";
+  const reminderOpts = [["0", "Never"], ["3", "Every 3 days"], ["7", "Weekly"],
+                        ["14", "Every 2 weeks"], ["30", "Monthly"]];
+  const autoOpts = [["never", "Off"], ["weekly", "Weekly"],
+                    ["after_n_materials", "After N new materials"]];
+  const nOpts = ["5", "10", "20"];
+  const rd = String(info.reminder_days == null ? 7 : info.reminder_days);
+  const af = info.auto_frequency || "never";
+  const nv = String(info.after_n_value || 10);
+  return `
+    <div class="bkstat"><span class="bkdot ${info.is_due ? "due" : "ok"}"></span>
+      <span>${esc(last)}</span></div>
+    <p class="hint">Destination: <b>${esc(backupDestinationLabel(info))}</b></p>
+    <div class="bkrow">
+      <button id="bk-now" class="btn primary" type="button">${icon("cloudup")}<span>Back up now</span></button>
+      <button id="bk-restore" class="btn" type="button">${icon("cloud")}<span>Restore…</span></button>
+    </div>
+    <label class="field"><span>Remind me to back up</span>
+      <select id="bk-remind">${reminderOpts.map(([v, l]) =>
+        `<option value="${v}" ${v === rd ? "selected" : ""}>${l}</option>`).join("")}</select>
+    </label>
+    <label class="field"><span>Auto-backup</span>
+      <select id="bk-auto">${autoOpts.map(([v, l]) =>
+        `<option value="${v}" ${v === af ? "selected" : ""}>${l}</option>`).join("")}</select>
+    </label>
+    <label class="field" id="bk-nfield" ${af === "after_n_materials" ? "" : "hidden"}>
+      <span>After how many new materials</span>
+      <select id="bk-n">${nOpts.map(v =>
+        `<option value="${v}" ${v === nv ? "selected" : ""}>${v}</option>`).join("")}</select>
+    </label>
+    <button id="bk-disconnect" class="textbtn wide" type="button">Disconnect</button>`;
+}
+
+function wireBackupSettings() {
+  const pick = $("#bk-pick");
+  if (pick) pick.addEventListener("click", () => {
+    try { MLBridge.pickBackupFolder(); }
+    catch (e) { toast("Folder picker unavailable", "error"); }
+  });
+  const connect = $("#bk-connect");
+  if (connect) connect.addEventListener("click", async () => {
+    const path = $("#bk-path").value.trim();
+    if (!path) { toast("Enter a folder path"); return; }
+    try {
+      await putBackupConfig({ destination_type: "local", destination_path: path });
+      toast("Backup folder connected");
+      renderSettings();
+    } catch (err) { toast("Could not connect: " + err.message, "error"); }
+  });
+  const now = $("#bk-now");
+  if (now) now.addEventListener("click", async () => { await doBackupNow(); renderSettings(); });
+  const restore = $("#bk-restore");
+  if (restore) restore.addEventListener("click", openRestore);
+  const disc = $("#bk-disconnect");
+  if (disc) disc.addEventListener("click", async () => {
+    const ok = await confirmDialog({
+      title: "Disconnect backup?",
+      message: "This stops backups and forgets the destination. Backups " +
+        "already saved there are not deleted.",
+      confirmLabel: "Disconnect" });
+    if (!ok) return;
+    try {
+      await api("/api/backup/disconnect", { method: "POST", body: formBody({}) });
+      if (window.MLBridge && typeof MLBridge.forgetBackupFolder === "function") {
+        try { MLBridge.forgetBackupFolder(); } catch (e) { /* off-device */ }
+      }
+      await refreshBackupInfo();
+      renderSettings();
+      toast("Backup disconnected");
+    } catch (err) { toast(err.message, "error"); }
+  });
+  const remind = $("#bk-remind");
+  if (remind) remind.addEventListener("change", () => {
+    putBackupConfig({ reminder_days: parseInt(remind.value, 10) }).catch(() => {});
+  });
+  const auto = $("#bk-auto");
+  if (auto) auto.addEventListener("change", () => {
+    const f = $("#bk-nfield"); if (f) f.hidden = auto.value !== "after_n_materials";
+    putBackupConfig({ auto_frequency: auto.value,
+                      after_n_value: parseInt(($("#bk-n") || { value: "10" }).value, 10) })
+      .catch(() => {});
+  });
+  const n = $("#bk-n");
+  if (n) n.addEventListener("change", () => {
+    putBackupConfig({ auto_frequency: "after_n_materials",
+                      after_n_value: parseInt(n.value, 10) }).catch(() => {});
+  });
 }
 
 // ---- settings view ----
@@ -2793,11 +3725,15 @@ function renderSettings() {
     </div>
 
     <div class="formcard">
-      <h3>${icon("download")}Backup</h3>
-      <p class="hint">Everything lives in plain folders at
-        <b id="set-dir">…</b>, so your file manager, USB transfer, and Drive
-        backup already see every file. The CSV export adds a
-        spreadsheet-friendly index of all metadata.</p>
+      <h3>${icon("cloud")}Backup &amp; restore</h3>
+      <div id="backupcard">${backupSettingsHTML()}</div>
+    </div>
+
+    <div class="formcard">
+      <h3>${icon("download")}Export</h3>
+      <p class="hint">Everything also lives in plain folders at
+        <b id="set-dir">…</b>, so your file manager and USB transfer see every
+        file. The CSV export adds a spreadsheet-friendly index of all metadata.</p>
       <a class="btn wide" href="/api/export.csv" target="_blank" rel="noopener">
         ${icon("download")}<span>Export index as CSV</span></a>
     </div>`;
@@ -2819,6 +3755,13 @@ function renderSettings() {
       toast("Rescan failed: " + err.message, "error");
       btn.disabled = false;
     }
+  });
+
+  wireBackupSettings();
+  refreshBackupInfo().then(() => {
+    if (route().view !== "settings") return;
+    const c = $("#backupcard");
+    if (c) { c.innerHTML = backupSettingsHTML(); wireBackupSettings(); }
   });
 
   api("/api/health").then(h => {
@@ -3182,15 +4125,19 @@ function renderForm({ view: mode, id }) {
           <button type="button" class="fremove" data-i="${i}"
                   aria-label="Remove ${esc(p.file.name)}">${icon("x")}</button>
         </div>
-        <input type="text" class="fnote" data-i="${i}"
-               placeholder="Optional note — e.g. Student handout"
-               value="${esc(p.note)}">
+        <div class="frowmeta">
+          <input type="text" class="frole-in" data-i="${i}" list="rolesdl"
+                 placeholder="Role — e.g. Answer key" value="${esc(p.role || "")}">
+          <input type="text" class="fnote" data-i="${i}"
+                 placeholder="Optional note" value="${esc(p.note)}">
+        </div>
       </div>`).join("");
     updateAttMeta();
   }
   updateAttMeta();
+  fillRolesDatalist();
   filepick.addEventListener("change", () => {
-    for (const f of filepick.files) pickedFiles.push({ file: f, note: "" });
+    for (const f of filepick.files) pickedFiles.push({ file: f, note: "", role: "" });
     filepick.value = "";
     renderPicked();
     applyImportSuggestions();
@@ -3205,7 +4152,9 @@ function renderForm({ view: mode, id }) {
   });
   $("#filerows").addEventListener("input", e => {
     const note = e.target.closest(".fnote");
-    if (note) pickedFiles[+note.dataset.i].note = note.value;
+    if (note) { pickedFiles[+note.dataset.i].note = note.value; return; }
+    const role = e.target.closest(".frole-in");
+    if (role) pickedFiles[+role.dataset.i].role = role.value;
   });
 
   if (mode === "edit" || mode === "repair") refreshSuggestions();
@@ -3337,6 +4286,7 @@ function renderForm({ view: mode, id }) {
       if (mode === "add") {
         pickedFiles.forEach(p => fd.append("files", p.file));
         fd.append("file_notes", JSON.stringify(pickedFiles.map(p => p.note)));
+        fd.append("file_roles", JSON.stringify(pickedFiles.map(p => p.role || "")));
         const out = await upload("/api/lessons", fd, onProgress);
         materialId = out.lesson.id;
       } else {
@@ -3344,6 +4294,7 @@ function renderForm({ view: mode, id }) {
           const ff = new FormData();
           pickedFiles.forEach(p => ff.append("files", p.file));
           ff.append("file_notes", JSON.stringify(pickedFiles.map(p => p.note)));
+          ff.append("file_roles", JSON.stringify(pickedFiles.map(p => p.role || "")));
           await upload("/api/lessons/" + encodeURIComponent(id) + "/files",
                        ff, onProgress);
           btn.textContent = "Saving…";
@@ -3453,6 +4404,9 @@ function initPullToRefresh() {
     await refresh();
     lastScanTs = Date.now();
     render();
+    refreshBackupInfo().then(() => {
+      if (route().view === "list") renderBackupBanner();
+    });
   } catch (err) {
     view.innerHTML = `
       <div class="emptystate">
