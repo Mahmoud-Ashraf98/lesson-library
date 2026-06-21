@@ -769,6 +769,7 @@ async function savePlan(plan) {
       title: plan.title, group: plan.group || "",
       plan_date: plan.plan_date || "", notes: plan.notes || "",
       items: JSON.stringify(plan.items || []),
+      stage_durations: JSON.stringify(plan.stage_durations || {}),
     }),
   });
   return replacePlan(out.plan);
@@ -942,8 +943,14 @@ function configureChrome(r) {
   updateInboxBadge();
 }
 
+let _runTicker = null;   // the single run-mode countdown interval (Feature B)
+function stopRunTicker() {
+  if (_runTicker) { clearInterval(_runTicker); _runTicker = null; }
+}
+
 function render() {
   if (!DB) return;
+  stopRunTicker();  // leaving any view tears down a running class timer
   const r = route();
   if (lastView === "list" && r.view !== "list") listScroll = window.scrollY;
   configureChrome(r);
@@ -2044,6 +2051,39 @@ const PLACEHOLDER_KINDS = [
   ["Warmer", "flame"], ["Break", "coffee"], ["Cool-down", "wind"],
 ];
 
+/* ---- run-mode timer helpers (Feature B) ---- */
+function fmtClock(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+}
+
+// Default seconds for an item's timer: a material's duration_min, a stage's
+// plan-level default (stage_durations) or the item's own duration, else 5 min.
+function runItemDefaultSecs(it, mats, p) {
+  if (it.placeholder) {
+    const key = String(it.placeholder).toLowerCase();
+    const mins = it.duration_min ||
+      (p.stage_durations && p.stage_durations[key]) || 5;
+    return mins * 60;
+  }
+  const m = mats.get(it.material_id);
+  return ((m && m.duration_min) || 5) * 60;
+}
+
+function splitNames(text) {
+  return String(text || "").split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+}
+
+function shuffled(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 function placeholderIcon(label) {
   const hit = PLACEHOLDER_KINDS.find(([l]) =>
     l.toLowerCase() === String(label).toLowerCase());
@@ -2491,14 +2531,103 @@ function renderRun(id) {
   let cur = p.items.findIndex(it => !it.done);
   if (cur < 0) cur = 0;
 
+  // run-session-only state, intentionally lost when leaving run mode
+  const timers = new Map();   // item object -> {remaining, running, auto, started}
+  let panelOpen = false;      // timer panel expanded inline?
+  let jumpQ = "";             // quick-jump search text
+  let pickAnim = null;        // picker "spin" interval, cleared on close
+  const picker = { names: [], excluded: new Set(), teams: 4, tab: "one" };
+
+  function timerFor(it) {
+    let t = timers.get(it);
+    if (!t) {
+      t = { remaining: runItemDefaultSecs(it, mats, p), running: false,
+            auto: false, started: false };
+      timers.set(it, t);
+    }
+    return t;
+  }
+  function timerTone(t) {
+    if (t.remaining <= 0) return "danger";
+    if (t.remaining <= 120) return "warn";
+    return "";
+  }
+  function syncTimer() {
+    const t = timerFor(p.items[cur]);
+    const tone = timerTone(t);
+    const chip = $("#timerchip");
+    if (chip) {
+      chip.className = "timerchip " + tone;
+      $("#timerchipval", chip).textContent = t.started ? fmtClock(t.remaining) : "--:--";
+    }
+    const disp = $("#timerdisp");
+    if (disp) { disp.textContent = fmtClock(t.remaining); disp.className = "timerdisp " + tone; }
+    const sb = $("#tm-start");
+    if (sb) sb.innerHTML = icon(t.running ? "timer" : "play") +
+      `<span>${t.running ? "Pause" : "Start"}</span>`;
+    const ab = $("#tm-auto");
+    if (ab) { ab.classList.toggle("on", t.auto); ab.setAttribute("aria-pressed", String(t.auto)); }
+  }
+  function tick() {
+    const t = timerFor(p.items[cur]);
+    if (!t.running) { stopRunTicker(); return; }
+    t.remaining -= 1;
+    if (t.remaining <= 0) {
+      t.remaining = 0; t.running = false; stopRunTicker(); syncTimer();
+      if (t.auto) advance(1);   // auto-advance; item is NOT auto-marked done
+      return;
+    }
+    syncTimer();
+  }
+  function pauseCurrent() {
+    const t = timers.get(p.items[cur]);
+    if (t) t.running = false;
+    stopRunTicker();
+  }
+  function advance(dir) {
+    pauseCurrent();
+    const ni = cur + dir;
+    if (ni < 0 || ni >= p.items.length) return;
+    cur = ni; panelOpen = false; paint();
+  }
+
+  function jumpResultsHTML() {
+    const q = jumpQ.trim().toLowerCase();
+    if (!q) return "";
+    const hits = DB.lessons.filter(m => searchHay(m).includes(q)).slice(0, 8);
+    return `<div class="jumpresults">${hits.length ? hits.map(m => `
+      <button type="button" class="jumprow" data-jump="${esc(m.id)}">
+        <span class="jumptitle">${esc(m.title)}</span>
+        <span class="jumpmeta">${(m.cefr_levels || []).map(lv =>
+          `<span class="badge ${cefrClass(lv)}">${esc(lv)}</span>`).join("")}
+          ${icon(materialIcon(m), "jumpfmt")}</span>
+      </button>`).join("") : `<div class="jumpnone">No materials match.</div>`}</div>`;
+  }
+
+  function timerPanelHTML(t) {
+    return `<div class="timerpanel" id="timerpanel">
+      <div class="timerdisp ${timerTone(t)}" id="timerdisp">${fmtClock(t.remaining)}</div>
+      <div class="timerbtns">
+        <button type="button" class="btn" id="tm-minus" aria-label="Subtract one minute">−1:00</button>
+        <button type="button" class="btn primary" id="tm-start">${icon(t.running ? "timer" : "play")}<span>${t.running ? "Pause" : "Start"}</span></button>
+        <button type="button" class="btn" id="tm-plus" aria-label="Add one minute">+1:00</button>
+      </div>
+      <div class="timerbtns">
+        <button type="button" class="btn" id="tm-reset">${icon("rescan")}<span>Reset</span></button>
+        <button type="button" class="chip toggle ${t.auto ? "on" : ""}" id="tm-auto"
+                aria-pressed="${t.auto}">${icon("chevron")}<span>Auto-advance at 0:00</span></button>
+      </div>
+    </div>`;
+  }
+
   function stepHTML() {
     const it = p.items[cur];
+    const t = timerFor(it);
     const { total, done } = planProgress(p);
     const m = it.placeholder ? null : mats.get(it.material_id);
     const body = it.placeholder ? `
       <span class="runtile">${icon(placeholderIcon(it.placeholder))}</span>
-      <h2>${esc(it.placeholder)}</h2>
-      ${it.duration_min ? `<div class="metaline center"><span>${icon("clock")}${it.duration_min} min</span></div>` : ""}`
+      <h2>${esc(it.placeholder)}</h2>`
     : m ? `
       ${heroThumbHTML(m)}
       <h2>${esc(m.title)}</h2>
@@ -2522,12 +2651,30 @@ function renderRun(id) {
       <p class="hint">This material is missing — renamed or deleted?</p>`;
     return `
       <a class="back" href="#/plan/${encodeURIComponent(p.id)}">${icon("back")}Exit class mode</a>
+      <div class="searchwrap runjump">
+        <div class="searchbox">
+          ${icon("search")}
+          <input id="runjumpq" type="search" autocomplete="off" enterkeyhint="search"
+                 aria-label="Search library to insert a side-track"
+                 placeholder="Search library to insert…" value="${esc(jumpQ)}">
+        </div>
+        ${jumpResultsHTML()}
+      </div>
       <div class="runhead">
         <span class="runcount">${cur + 1} of ${total}</span>
         <div class="progressbar"><span style="width:${(done / total) * 100}%"></span></div>
       </div>
-      <div class="runcard${it.done ? " done" : ""}">${body}
+      <div class="runcard${it.done ? " done" : ""}">
+        <div class="runcardtop">
+          ${it.side_track ? `<span class="sidetrack">${icon("shuffle")}Side-track</span>` : "<span></span>"}
+          <button type="button" class="timerchip ${timerTone(t)}" id="timerchip"
+                  aria-label="Timer">${icon("timer")}<span id="timerchipval">${t.started ? fmtClock(t.remaining) : "--:--"}</span></button>
+          ${it.side_track ? `<button type="button" class="iconbtn small" id="runremove"
+                  aria-label="Remove side-track">${icon("x")}</button>` : "<span></span>"}
+        </div>
+        ${body}
         ${it.done ? `<div class="rundone">${icon("circlecheck")}Done</div>` : ""}
+        ${panelOpen ? timerPanelHTML(t) : ""}
       </div>
       <div class="runctrls">
         <button id="runprev" class="btn big" type="button" ${cur === 0 ? "disabled" : ""}
@@ -2536,10 +2683,176 @@ function renderRun(id) {
           ${icon(it.done ? "circle" : "check")}<span>${it.done ? "Not done" : "Done"}</span></button>
         <button id="runnext" class="btn big" type="button" ${cur === p.items.length - 1 ? "disabled" : ""}
                 aria-label="Next item">${icon("chevron")}</button>
-      </div>`;
+      </div>
+      <button type="button" id="runpickbtn" class="runpick"
+              aria-label="Random picker">${icon("hand")}<span>Pick</span></button>`;
+  }
+
+  // ---- random student / team picker (in-memory, no roster, no logging) ----
+  function openPicker() {
+    let dlg = $("#runpickerdlg");
+    if (!dlg) {
+      dlg = document.createElement("dialog");
+      dlg.id = "runpickerdlg";
+      dlg.className = "dlg formdlg pickerdlg";
+      document.body.appendChild(dlg);
+    }
+    function bodyHTML() {
+      if (picker.tab === "teams") {
+        return `<label class="field"><span>Number of teams</span>
+            <input type="number" id="pk-teams" min="2" max="12" value="${picker.teams}"></label>
+          <button type="button" id="pk-shuffle" class="btn primary big wide">${icon("shuffle")}<span>Shuffle</span></button>
+          <div id="pk-teamsout" class="pk-teams"></div>`;
+      }
+      return `<button type="button" id="pk-pick" class="btn primary big wide">${icon("hand")}<span>Pick</span></button>
+        <div id="pk-result" class="pk-result"></div>
+        <button type="button" id="pk-reset" class="btn wide" ${picker.excluded.size ? "" : "disabled"}>Reset</button>`;
+    }
+    function paintPicker() {
+      dlg.innerHTML = `
+        <div class="pickertabs" role="tablist">
+          <button type="button" class="ptab ${picker.tab === "one" ? "on" : ""}" data-tab="one">Pick one</button>
+          <button type="button" class="ptab ${picker.tab === "teams" ? "on" : ""}" data-tab="teams">Make teams</button>
+        </div>
+        <textarea id="pk-names" class="pk-names" rows="3"
+          placeholder="Type or paste names — one per line">${esc(picker.names.join("\n"))}</textarea>
+        <div class="pk-count">${picker.names.length} name${picker.names.length === 1 ? "" : "s"}</div>
+        <div id="pk-body">${bodyHTML()}</div>
+        <div class="dlg-actions"><button type="button" id="pk-close" class="btn">Close</button></div>`;
+      wire();
+    }
+    function pickOne() {
+      const pool = picker.names.filter(n => !picker.excluded.has(n));
+      const res = $("#pk-result");
+      if (!pool.length) {
+        res.textContent = picker.names.length
+          ? "Everyone's had a turn — tap Reset to go again." : "Add some names first.";
+        return;
+      }
+      const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const land = () => {
+        const chosen = pool[Math.floor(Math.random() * pool.length)];
+        picker.excluded.add(chosen);
+        res.innerHTML = `<span class="pk-name landed">${esc(chosen)}</span>`;
+        const rb = $("#pk-reset"); if (rb) rb.disabled = false;
+      };
+      if (reduce) { land(); return; }
+      let ticks = 0;
+      if (pickAnim) clearInterval(pickAnim);
+      pickAnim = setInterval(() => {
+        res.innerHTML = `<span class="pk-name spin">${esc(pool[Math.floor(Math.random() * pool.length)])}</span>`;
+        if (++ticks >= 12) { clearInterval(pickAnim); pickAnim = null; land(); }
+      }, 80);
+    }
+    function shuffleTeams() {
+      const n = Math.max(2, Math.min(12, parseInt($("#pk-teams").value, 10) || 4));
+      picker.teams = n;
+      const names = shuffled(picker.names);
+      const out = $("#pk-teamsout");
+      if (!names.length) { out.innerHTML = `<p class="hint">Add some names first.</p>`; return; }
+      const teams = Array.from({ length: n }, () => []);
+      names.forEach((nm, i) => teams[i % n].push(nm));
+      out.innerHTML = teams.map((t, i) => `<div class="pk-team">
+        <div class="pk-teamhead">Team ${i + 1}</div>
+        ${t.map(nm => `<div class="pk-member">${esc(nm)}</div>`).join("")}</div>`).join("");
+    }
+    function wire() {
+      $$(".ptab", dlg).forEach(b => b.addEventListener("click", () => {
+        picker.tab = b.dataset.tab; paintPicker();
+      }));
+      $("#pk-names", dlg).addEventListener("input", e => {
+        picker.names = splitNames(e.target.value);
+        picker.excluded = new Set([...picker.excluded].filter(n => picker.names.includes(n)));
+        const c = $(".pk-count", dlg);
+        if (c) c.textContent = picker.names.length + " name" + (picker.names.length === 1 ? "" : "s");
+      });
+      const pick = $("#pk-pick"); if (pick) pick.addEventListener("click", pickOne);
+      const reset = $("#pk-reset"); if (reset) reset.addEventListener("click", () => {
+        picker.excluded.clear(); $("#pk-result").textContent = ""; reset.disabled = true;
+      });
+      const sh = $("#pk-shuffle"); if (sh) sh.addEventListener("click", shuffleTeams);
+      $("#pk-close", dlg).addEventListener("click", () => {
+        if (pickAnim) { clearInterval(pickAnim); pickAnim = null; }
+        dlg.close();
+      });
+    }
+    paintPicker();
+    if (!openDialog(dlg)) { /* no dialog support: nothing else to do */ }
+  }
+
+  function wireStep() {
+    $("#runprev").addEventListener("click", () => advance(-1));
+    $("#runnext").addEventListener("click", () => advance(1));
+    $("#rundone").addEventListener("click", async () => {
+      const marking = !p.items[cur].done;
+      await setPlanItemDone(p, cur, marking, mats);
+      if (marking) {
+        const next = p.items.findIndex((it, i) => i > cur && !it.done);
+        if (next >= 0) { pauseCurrent(); cur = next; panelOpen = false; }
+      }
+      paint();
+    });
+    $("#timerchip").addEventListener("click", () => { panelOpen = !panelOpen; paint(); });
+    $("#runpickbtn").addEventListener("click", openPicker);
+
+    const remove = $("#runremove");
+    if (remove) remove.addEventListener("click", () => {
+      timers.delete(p.items[cur]);
+      p.items.splice(cur, 1);
+      if (!p.items.length) { location.hash = "#/plan/" + encodeURIComponent(p.id); return; }
+      if (cur >= p.items.length) cur = p.items.length - 1;
+      panelOpen = false; paint();
+      toast("Side-track removed");
+    });
+
+    // quick-jump
+    const jq = $("#runjumpq");
+    jq.addEventListener("input", e => {
+      jumpQ = e.target.value;
+      const wrap = $(".runjump");
+      const old = $(".jumpresults", wrap);
+      if (old) old.remove();
+      wrap.insertAdjacentHTML("beforeend", jumpResultsHTML());
+    });
+    $(".runjump").addEventListener("click", e => {
+      const row = e.target.closest("[data-jump]");
+      if (!row) return;
+      const m = DB.lessons.find(x => x.id === row.dataset.jump);
+      if (!m) return;
+      pauseCurrent();
+      p.items.splice(cur, 0, { material_id: m.id, done: false, note: "", side_track: true });
+      jumpQ = ""; panelOpen = false; paint();
+      toast(`Inserted “${m.title}” — save the plan to keep it`);
+    });
+
+    // timer panel controls
+    const start = $("#tm-start");
+    if (start) {
+      const t = timerFor(p.items[cur]);
+      start.addEventListener("click", () => {
+        if (t.running) { t.running = false; stopRunTicker(); }
+        else {
+          if (t.remaining <= 0) t.remaining = runItemDefaultSecs(p.items[cur], mats, p);
+          t.running = true; t.started = true; stopRunTicker(); _runTicker = setInterval(tick, 1000);
+        }
+        syncTimer();
+      });
+      $("#tm-reset").addEventListener("click", () => {
+        t.running = false; t.started = false; stopRunTicker();
+        t.remaining = runItemDefaultSecs(p.items[cur], mats, p); syncTimer();
+      });
+      $("#tm-minus").addEventListener("click", () => {
+        t.remaining = Math.max(0, t.remaining - 60); t.started = true; syncTimer();
+      });
+      $("#tm-plus").addEventListener("click", () => {
+        t.remaining += 60; t.started = true; syncTimer();
+      });
+      $("#tm-auto").addEventListener("click", () => { t.auto = !t.auto; syncTimer(); });
+    }
   }
 
   function paint() {
+    stopRunTicker();
     if ((p.items || []).every(it => it.done)) {
       const mins = planMinutes(p, mats);
       view.innerHTML = `
@@ -2554,21 +2867,11 @@ function renderRun(id) {
       return;
     }
     view.innerHTML = stepHTML();
-    $("#runprev").addEventListener("click", () => {
-      if (cur > 0) { cur--; paint(); }
-    });
-    $("#runnext").addEventListener("click", () => {
-      if (cur < p.items.length - 1) { cur++; paint(); }
-    });
-    $("#rundone").addEventListener("click", async () => {
-      const marking = !p.items[cur].done;
-      await setPlanItemDone(p, cur, marking, mats);
-      if (marking) {
-        const next = p.items.findIndex((it, i) => i > cur && !it.done);
-        if (next >= 0) cur = next;
-      }
-      paint();
-    });
+    wireStep();
+    // a running timer survives a repaint (insert/toggle); resume its ticking
+    const t = timers.get(p.items[cur]);
+    if (t && t.running) { stopRunTicker(); _runTicker = setInterval(tick, 1000); }
+    syncTimer();
   }
   paint();
 }

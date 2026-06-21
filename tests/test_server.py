@@ -627,6 +627,34 @@ class TestPlans(LibraryTestCase):
         self.assertTrue(plan["unreadable"])
         self.assertEqual(plan["title"], "broken")
 
+    def test_stage_durations_accepted_and_validated(self):
+        plan = self.make_plan().get_json()["plan"]
+        out = self.client.post(
+            "/api/plans/" + plan["id"],
+            data={"title": plan["title"], "stage_durations": json.dumps(
+                {"warmer": 8, "break": "5", "cool-down": 10})},
+            content_type="multipart/form-data").get_json()["plan"]
+        self.assertEqual(out["stage_durations"],
+                         {"warmer": 8, "break": 5, "cool-down": 10})
+        server.rebuild_index()
+        again = server.STATE["plans"][plan["id"]]
+        self.assertEqual(again["stage_durations"], out["stage_durations"])
+
+    def test_stage_durations_drops_invalid_values(self):
+        plan = self.make_plan().get_json()["plan"]
+        out = self.client.post(
+            "/api/plans/" + plan["id"],
+            data={"title": plan["title"], "stage_durations": json.dumps(
+                {"warmer": -3, "break": "soon", "cool-down": 999,
+                 "bogus": 5})},
+            content_type="multipart/form-data").get_json()["plan"]
+        # all invalid or unknown keys dropped, never written
+        self.assertEqual(out["stage_durations"], {})
+
+    def test_plan_without_stage_durations_defaults_empty(self):
+        plan = self.make_plan().get_json()["plan"]
+        self.assertEqual(plan["stage_durations"], {})
+
     def test_placeholder_items_round_trip(self):
         plan = self.make_plan().get_json()["plan"]
         items = [{"placeholder": "Warmer", "duration_min": 5},

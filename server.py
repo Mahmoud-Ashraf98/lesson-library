@@ -374,6 +374,22 @@ def normalize_record(material_id, raw, files):
 PLAN_SCHEMA_VERSION = 1
 
 
+STAGE_KEYS = ("warmer", "break", "cool-down")
+
+
+def normalize_stage_durations(value):
+    """Optional per-stage default minutes for the run-mode timer (Feature B).
+    Each key optional, integer 1–180; invalid values are dropped, never
+    written, so the client falls back to its 5-minute default."""
+    out = {}
+    if isinstance(value, dict):
+        for key in STAGE_KEYS:
+            n = parse_duration(value.get(key))
+            if n is not None and 1 <= n <= 180:
+                out[key] = n
+    return out
+
+
 def normalize_plan(plan_id, raw):
     """API-shaped plan from plan.json (or anything resembling one). Items
     reference materials by folder id; a dangling reference is kept — the
@@ -404,6 +420,7 @@ def normalize_plan(plan_id, raw):
         "plan_date": clean_line(raw.get("plan_date")),
         "notes": str(raw.get("notes") or "").strip(),
         "items": items,
+        "stage_durations": normalize_stage_durations(raw.get("stage_durations")),
         "date_added": clean_line(raw.get("date_added")),
     }
 
@@ -415,6 +432,10 @@ def plan_from_form(plan_id, form):
         raw["items"] = json.loads(form.get("items") or "[]")
     except ValueError:
         raw["items"] = []
+    try:
+        raw["stage_durations"] = json.loads(form.get("stage_durations") or "{}")
+    except ValueError:
+        raw["stage_durations"] = {}
     return normalize_plan(plan_id, raw)
 
 
