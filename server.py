@@ -34,6 +34,7 @@ import socket
 import sys
 import threading
 import unicodedata
+import zipfile
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -1019,6 +1020,7 @@ def api_create():
     write_lesson_json(folder, disk_record(rec))
     with LOCK:
         STATE["lessons"][slug] = rec
+    bump_materials_added()  # drives the "back up after N new materials" nudge
     log(f"created {slug!r} ({len(rec['files'])} file(s))")
     return jsonify(lesson=rec), 201
 
@@ -1710,6 +1712,391 @@ def serve_kit_file(lid, filename):
 @app.errorhandler(413)
 def too_large(_):
     return jsonify(error="Upload too large (limit 512 MB per request)."), 413
+
+
+# ---- backup & restore (Feature E) -------------------------------------------
+# The ONLY feature permitted to touch a network, and only through a
+# destination the teacher explicitly configured: a local/rclone-mounted path
+# (Termux, desktop) or the Android Storage Access Framework bridge (any cloud
+# provider the phone has). When unconfigured, every /api/backup/* action route
+# returns 503 and the rest of the app is untouched. backup.json (at the data
+# root) is the only new file. See CLAUDE.md for the scoped relaxation.
+BACKUP_SUBDIRS = ("lessons", "plans", "Inbox", "Trash")
+BACKUP_NAME_RE = re.compile(r"^lesson-library-backup-\d{8}-\d{6}\.zip$")
+RESTORE_STRATEGIES = ("replace_all", "merge_skip", "merge_overwrite")
+
+
+def read_backup_config():
+    try:
+        raw = json.loads((DATA_DIR / "backup.json")
+                         .read_text(encoding="utf-8-sig"))
+        return raw if isinstance(raw, dict) else {}
+    except Exception:
+        return {}
+
+
+def write_backup_config(cfg):
+    write_sidecar_json(DATA_DIR, "backup.json", cfg)
+
+
+def backup_configured(cfg=None):
+    cfg = read_backup_config() if cfg is None else cfg
+    dt = cfg.get("destination_type")
+    if dt == "local":
+        return bool(cfg.get("destination_path"))
+    if dt == "saf":
+        return bool(cfg.get("destination_uri"))
+    return False
+
+
+def material_count():
+    if not LESSONS_DIR.is_dir():
+        return 0
+    return sum(1 for e in LESSONS_DIR.iterdir() if e.is_dir())
+
+
+def bump_materials_added():
+    """After a material is created. No-op unless backup is configured, so an
+    offline library never grows a backup.json on its own."""
+    cfg = read_backup_config()
+    if not backup_configured(cfg):
+        return
+    cfg["materials_added_since_last_backup"] = \
+        int(cfg.get("materials_added_since_last_backup") or 0) + 1
+    write_backup_config(cfg)
+
+
+def backup_health_snapshot():
+    with LOCK:
+        lessons = list(STATE["lessons"].values())
+        needs = list(STATE["needs"].values())
+    untagged = [r["id"] for r in lessons
+                if not (r["cefr_levels"] or r["exam_targets"])
+                or not r["skills"] or not r["formats"] or not r["topics"]]
+    return {"created_at": now_iso(), "materials": len(lessons),
+            "needs_attention": len(needs), "untagged": untagged}
+
+
+def write_backup_zip(dest_file):
+    """Stream the whole data tree into a zip at dest_file (a Path). Folder
+    names — which are material/plan ids — are preserved exactly. Returns the
+    material count."""
+    count = material_count()
+    with zipfile.ZipFile(dest_file, "w", zipfile.ZIP_DEFLATED,
+                         allowZip64=True) as zf:
+        for sub in BACKUP_SUBDIRS:
+            base = DATA_DIR / sub
+            if not base.is_dir():
+                continue
+            for root, _dirs, files in os.walk(base):
+                for name in files:
+                    if name.lower().endswith(".tmp"):
+                        continue
+                    full = Path(root) / name
+                    zf.write(str(full), full.relative_to(DATA_DIR).as_posix())
+        zf.writestr("health.json",
+                    json.dumps(backup_health_snapshot(), ensure_ascii=False,
+                               indent=2))
+    return count
+
+
+def _saf_bridge():
+    """The Android Java bridge, or None off-device (Termux/desktop/tests)."""
+    try:
+        from java import jclass
+        return jclass("com.lessonlibrary.app.BackupBridge")
+    except Exception:
+        return None
+
+
+def deliver_backup(cfg, src_path, name):
+    if cfg.get("destination_type") == "local":
+        dest_dir = Path(cfg["destination_path"])
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(src_path), str(dest_dir / name))
+    else:
+        bridge = _saf_bridge()
+        if bridge is None:
+            raise RuntimeError("The backup folder isn't reachable on this "
+                               "device.")
+        bridge.writeBackupToUri(src_path.read_bytes(), name)
+
+
+def list_backups(cfg=None):
+    cfg = read_backup_config() if cfg is None else cfg
+    out = []
+    if cfg.get("destination_type") == "local":
+        d = Path(cfg.get("destination_path") or "")
+        if d.is_dir():
+            for entry in d.iterdir():
+                if entry.is_file() and BACKUP_NAME_RE.match(entry.name):
+                    try:
+                        st = entry.stat()
+                    except OSError:
+                        continue
+                    out.append({
+                        "name": entry.name, "size_bytes": st.st_size,
+                        "modified_at": (datetime.fromtimestamp(st.st_mtime)
+                                        .astimezone().isoformat(timespec="seconds"))})
+    else:
+        bridge = _saf_bridge()
+        if bridge is not None:
+            try:
+                names = json.loads(bridge.readBackupNames())
+            except Exception:
+                names = []
+            for n in names if isinstance(names, list) else []:
+                if isinstance(n, str) and BACKUP_NAME_RE.match(n):
+                    out.append({"name": n, "size_bytes": 0, "modified_at": ""})
+    out.sort(key=lambda b: b["name"], reverse=True)
+    return out
+
+
+def read_backup_bytes(cfg, name):
+    if not BACKUP_NAME_RE.match(name):  # also the traversal gate (no slashes)
+        raise ValueError("Not a backup file name.")
+    if cfg.get("destination_type") == "local":
+        return (Path(cfg["destination_path"]) / name).read_bytes()
+    bridge = _saf_bridge()
+    if bridge is None:
+        raise RuntimeError("The backup folder isn't reachable on this device.")
+    return bytes(bridge.readBackupBytes(name))
+
+
+def backup_is_due(cfg):
+    if not backup_configured(cfg):
+        return False
+    if cfg.get("auto_frequency") == "after_n_materials":
+        n = int(cfg.get("after_n_value") or 0)
+        if n > 0 and int(cfg.get("materials_added_since_last_backup") or 0) >= n:
+            return True
+    days = cfg.get("reminder_days")
+    if isinstance(days, (int, float)) and days > 0:
+        last = cfg.get("last_backup_at")
+        if not last:
+            return True
+        try:
+            then = datetime.fromisoformat(last)
+        except ValueError:
+            return True
+        now = datetime.now(then.tzinfo) if then.tzinfo else datetime.now()
+        if (now - then).total_seconds() >= days * 86400:
+            return True
+    return False
+
+
+def perform_backup():
+    cfg = read_backup_config()
+    if not backup_configured(cfg):
+        return None
+    name = "lesson-library-backup-" + datetime.now().strftime("%Y%m%d-%H%M%S") \
+           + ".zip"
+    tmp = DATA_DIR / (name + ".tmp")
+    try:
+        count = write_backup_zip(tmp)
+        size = tmp.stat().st_size
+        deliver_backup(cfg, tmp, name)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    cfg["last_backup_at"] = now_iso()
+    cfg["last_backup_size_bytes"] = size
+    cfg["last_backup_material_count"] = count
+    cfg["materials_added_since_last_backup"] = 0
+    write_backup_config(cfg)
+    return {"ok": True, "bytes": size, "material_count": count,
+            "timestamp": cfg["last_backup_at"], "name": name}
+
+
+def _dirs_in_zip(zf, sub):
+    out = set()
+    for n in zf.namelist():
+        parts = n.split("/")
+        if len(parts) >= 2 and parts[0] == sub and parts[1]:
+            out.add(parts[1])
+    return out
+
+
+def _extract_dir(zf, sub, did, base_dir):
+    """Replace base_dir/<did> with the backup's copy."""
+    target = base_dir / did
+    if target.exists():
+        shutil.rmtree(target)
+    prefix = sub + "/" + did + "/"
+    for n in zf.namelist():
+        if n.startswith(prefix) and not n.endswith("/"):
+            out = DATA_DIR / n
+            out.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(n) as src, open(out, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+
+def merge_subdir(zf, sub, strategy):
+    base = DATA_DIR / sub
+    base.mkdir(parents=True, exist_ok=True)
+    added, skipped, overwritten = [], [], []
+    for did in sorted(_dirs_in_zip(zf, sub)):
+        exists = (base / did).is_dir()
+        if exists and strategy == "merge_skip":
+            skipped.append(did)
+            continue
+        _extract_dir(zf, sub, did, base)
+        (overwritten if exists else added).append(did)
+    return added, skipped, overwritten
+
+
+def detect_conflicts(zf):
+    """Material ids whose lesson.json differs between the backup and the local
+    copy — i.e. both devices edited the same material. Reported, never
+    auto-resolved."""
+    conflicts = []
+    names = set(zf.namelist())
+    for mid in sorted(_dirs_in_zip(zf, "lessons")):
+        local = LESSONS_DIR / mid / "lesson.json"
+        member = "lessons/" + mid + "/lesson.json"
+        if not local.is_file() or member not in names:
+            continue
+        try:
+            if zf.read(member).strip() != local.read_bytes().strip():
+                conflicts.append(mid)
+        except Exception:
+            continue
+    return conflicts
+
+
+def perform_restore(backup_name, strategy):
+    cfg = read_backup_config()
+    if not backup_configured(cfg):
+        return None
+    if strategy not in RESTORE_STRATEGIES:
+        raise ValueError("Unknown restore strategy.")
+    data = read_backup_bytes(cfg, backup_name)
+    zf = zipfile.ZipFile(io.BytesIO(data))
+    conflicts = detect_conflicts(zf)        # before we touch the current state
+    safety = None                           # pre-restore safety backup
+    try:
+        res = perform_backup()
+        safety = res["name"] if res else None
+    except Exception:
+        safety = None
+    if strategy == "replace_all":
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        holder = DATA_DIR / ("Trash-restore-" + stamp)
+        holder.mkdir(parents=True, exist_ok=True)
+        for sub in BACKUP_SUBDIRS:
+            base = DATA_DIR / sub
+            if base.exists():
+                shutil.move(str(base), str(holder / sub))
+        ensure_dirs()
+        members = [n for n in zf.namelist()
+                   if n.split("/")[0] in BACKUP_SUBDIRS and not n.endswith("/")]
+        zf.extractall(DATA_DIR, members=members)
+        result = {"strategy": strategy,
+                  "restored": sorted(_dirs_in_zip(zf, "lessons")),
+                  "moved_aside": holder.name}
+    else:
+        la, ls, lo = merge_subdir(zf, "lessons", strategy)
+        pa, ps, po = merge_subdir(zf, "plans", strategy)
+        result = {"strategy": strategy, "added": la, "skipped": ls,
+                  "overwritten": lo, "plans_added": pa, "plans_skipped": ps,
+                  "plans_overwritten": po}
+    result["conflicts"] = conflicts
+    result["safety_backup"] = safety
+    rebuild_index()
+    return result
+
+
+@app.post("/api/backup/now")
+def api_backup_now():
+    if not backup_configured():
+        return jsonify(error="Backup isn't set up yet."), 503
+    try:
+        result = perform_backup()
+    except Exception as e:
+        log(f"backup failed: {e}")
+        return jsonify(error=f"Backup failed: {e}"), 500
+    log(f"backup {result['name']} ({result['bytes']} bytes)")
+    return jsonify(result)
+
+
+@app.get("/api/backup/status")
+def api_backup_status():
+    cfg = read_backup_config()
+    if not backup_configured(cfg):
+        return jsonify(error="Backup isn't set up yet.", configured=False), 503
+    out = dict(cfg)
+    out["configured"] = True
+    out["is_due"] = backup_is_due(cfg)
+    return jsonify(out)
+
+
+@app.get("/api/backup/list")
+def api_backup_list():
+    if not backup_configured():
+        return jsonify(error="Backup isn't set up yet."), 503
+    return jsonify(backups=list_backups())
+
+
+@app.post("/api/backup/restore")
+def api_backup_restore():
+    if not backup_configured():
+        return jsonify(error="Backup isn't set up yet."), 503
+    name = clean_line(request.form.get("backup_name"))
+    strategy = clean_line(request.form.get("strategy")) or "merge_skip"
+    if not BACKUP_NAME_RE.match(name):
+        return jsonify(error="Pick a backup to restore."), 400
+    if strategy not in RESTORE_STRATEGIES:
+        return jsonify(error="Unknown restore strategy."), 400
+    try:
+        result = perform_restore(name, strategy)
+    except Exception as e:
+        log(f"restore failed: {e}")
+        return jsonify(error=f"Restore failed: {e}"), 500
+    log(f"restored {name} via {strategy}")
+    return jsonify(result)
+
+
+@app.put("/api/backup/config")
+def api_backup_config():
+    """Configure (or reconfigure) the backup destination and cadence. This is
+    the route that turns the feature on, so it works while unconfigured."""
+    cfg = read_backup_config()
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        body = request.form.to_dict()
+    for k in ("destination_type", "destination_uri", "destination_path",
+              "auto_frequency", "after_n_value", "reminder_days"):
+        if k in body:
+            cfg[k] = body[k]
+    if cfg.get("destination_type") not in (None, "", "saf", "local"):
+        return jsonify(error="Unknown destination type."), 400
+    if cfg.get("after_n_value") is not None:
+        cfg["after_n_value"] = parse_duration(cfg.get("after_n_value")) or 0
+    if cfg.get("reminder_days") is not None:
+        try:
+            cfg["reminder_days"] = int(cfg.get("reminder_days"))
+        except (TypeError, ValueError):
+            cfg["reminder_days"] = 0
+    cfg.setdefault("materials_added_since_last_backup", 0)
+    write_backup_config(cfg)
+    out = dict(cfg)
+    out["configured"] = backup_configured(cfg)
+    out["is_due"] = backup_is_due(cfg)
+    return jsonify(out)
+
+
+@app.post("/api/backup/disconnect")
+def api_backup_disconnect():
+    cfg = read_backup_config()
+    if not backup_configured(cfg):
+        return jsonify(error="Backup isn't set up yet."), 503
+    for k in ("destination_type", "destination_uri", "destination_path"):
+        cfg.pop(k, None)
+    write_backup_config(cfg)
+    log("backup destination disconnected")
+    return jsonify(ok=True)
 
 
 # ---- startup ----------------------------------------------------------------------

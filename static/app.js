@@ -114,6 +114,8 @@ const ICONS = {
   monitor: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>',
   rescan: '<path d="M21 12a9 9 0 1 1-2.6-6.3L21 8"/><path d="M21 3v5h-5"/>',
   star: '<path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>',
+  cloud: '<path d="M17.5 19a4.5 4.5 0 1 0-1.4-8.78A6 6 0 1 0 6 15.9"/><path d="M12 12v9"/><path d="m8 17 4 4 4-4"/>',
+  cloudup: '<path d="M17.5 19a4.5 4.5 0 1 0-1.4-8.78A6 6 0 1 0 6 15.9"/><path d="M12 21v-9"/><path d="m8 16 4-4 4 4"/>',
   timer: '<line x1="10" y1="2" x2="14" y2="2"/><line x1="12" y1="14" x2="15" y2="11"/><circle cx="12" cy="14" r="8"/>',
   shuffle: '<path d="M2 18h1.4c1.3 0 2.5-.7 3.2-1.8l6.8-10.4c.7-1.1 1.9-1.8 3.2-1.8H22"/><path d="m18 2 4 4-4 4"/><path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/><path d="M14.5 15.8c.7 1.3 2.1 2.2 3.6 2.2H22"/><path d="m18 14 4 4-4 4"/>',
   hand: '<path d="M18 11V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2"/><path d="M14 10V4a2 2 0 0 0-2-2 2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/>',
@@ -1277,6 +1279,7 @@ function renderList() {
       <div id="recentwrap" class="recentwrap" hidden></div>
     </div>
     <div id="inboxbanner"></div>
+    <div id="backupbanner"></div>
     <div id="filterpanel" class="filterpanel" ${filtersOpen ? "" : "hidden"}>
       <div id="facets">
         ${COMPACT_FACETS.map(([key, label]) => !opts[key].length ? "" : `
@@ -1323,6 +1326,7 @@ function renderList() {
     <div id="results" class="results"></div>`;
 
   renderInboxBanner();
+  renderBackupBanner();
 
   // "More filters" pickers reuse the combobox over values actually in use.
   const moreBox = $("#morefilters");
@@ -3316,6 +3320,11 @@ async function renderHealth() {
       : `<p class="hint">Every material has a level, skills, format, and topics. Nice.</p>`}
     </div>
 
+    <div class="formcard" id="health-backup">
+      <h3>${icon("cloud")}Backup</h3>
+      <p class="hint">Loading backup status…</p>
+    </div>
+
     <div class="formcard">
       <h3>${icon("trash")}Trash</h3>
       ${(h.trash || []).length ? `
@@ -3330,6 +3339,31 @@ async function renderHealth() {
 
   const nrs = $("#needsrevstat");
   if (nrs) nrs.addEventListener("click", () => { reflectFilter = "needs"; });
+
+  // backup status card (async — fills in once /api/backup/status resolves)
+  refreshBackupInfo().then(() => {
+    const card = $("#health-backup");
+    if (!card || route().view !== "health") return;
+    const info = backupInfo;
+    card.innerHTML = `<h3>${icon("cloud")}Backup</h3>` + (info.configured ? `
+      <div class="bkstat"><span class="bkdot ${info.is_due ? "due" : "ok"}"></span>
+        <span>${info.last_backup_at
+          ? "Last backup " + esc(relDate(info.last_backup_at)) +
+            (info.last_backup_size_bytes ? " · " + fmtSize(info.last_backup_size_bytes) : "")
+          : "Never backed up yet"}</span></div>
+      ${(info.materials_added_since_last_backup || 0)
+        ? `<p class="hint">${info.materials_added_since_last_backup} material(s) added since the last backup.</p>` : ""}
+      <div class="bkrow">
+        <button id="hb-now" class="btn primary" type="button">${icon("cloudup")}<span>Back up now</span></button>
+        <button id="hb-restore" class="btn" type="button">${icon("cloud")}<span>Restore…</span></button>
+      </div>`
+    : `<p class="hint">Not set up yet — keep your library safe on Drive.</p>
+       <a class="btn wide" href="#/settings">${icon("cloud")}<span>Set up backup</span></a>`);
+    const hbnow = $("#hb-now");
+    if (hbnow) hbnow.addEventListener("click", async () => { await doBackupNow(); renderHealth(); });
+    const hbr = $("#hb-restore");
+    if (hbr) hbr.addEventListener("click", openRestore);
+  });
 
   const emptyBtn = $("#emptytrash");
   if (emptyBtn) {
@@ -3351,6 +3385,299 @@ async function renderHealth() {
       }
     });
   }
+}
+
+// ---- backup & restore (Feature E) ----
+// The only feature that can reach a network, and only via a destination the
+// teacher explicitly configured. backupInfo caches /api/backup/status so the
+// home banner and settings stay in sync without refetching constantly.
+let backupInfo = null;
+let backupDismissed = false;   // reminder banner dismissed this session
+
+function onAndroid() {
+  return !!(window.MLBridge && typeof MLBridge.pickBackupFolder === "function");
+}
+
+async function refreshBackupInfo() {
+  try {
+    const res = await fetch("/api/backup/status");
+    backupInfo = res.ok ? await res.json() : { configured: false };
+  } catch (e) {
+    backupInfo = { configured: false };
+  }
+  return backupInfo;
+}
+
+async function putBackupConfig(patch) {
+  const out = await api("/api/backup/config", {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch) });
+  backupInfo = out;
+  return out;
+}
+
+// Android calls this back from the SAF folder picker (see MainActivity).
+window.onBackupFolderPicked = function (uri) {
+  if (!uri) return;
+  putBackupConfig({ destination_type: "saf", destination_uri: uri })
+    .then(() => { toast("Backup folder connected"); if (route().view === "settings") renderSettings(); })
+    .catch(err => toast("Could not connect: " + err.message, "error"));
+};
+
+async function doBackupNow() {
+  if (!backupInfo || !backupInfo.configured) {
+    toast("Set up a backup destination first");
+    location.hash = "#/settings";
+    return null;
+  }
+  toast("Backing up…", "ok", { duration: 2000 });
+  try {
+    const out = await api("/api/backup/now", { method: "POST", body: formBody({}) });
+    await refreshBackupInfo();
+    toast(`Backed up ${out.material_count} material${out.material_count === 1 ? "" : "s"} · ${fmtSize(out.bytes)}`);
+    return out;
+  } catch (err) {
+    toast("Backup failed: " + err.message, "error");
+    return null;
+  }
+}
+
+function backupReminderText(info) {
+  if (!info.last_backup_at) return "You haven't backed up yet.";
+  if (info.auto_frequency === "after_n_materials" &&
+      (info.materials_added_since_last_backup || 0) >= (info.after_n_value || 0) &&
+      (info.after_n_value || 0) > 0) {
+    return `${info.materials_added_since_last_backup} new materials since your last backup.`;
+  }
+  return `Last backup was ${relDate(info.last_backup_at)}.`;
+}
+
+// Non-blocking reminder on the library home; only when a backup is actually due.
+function renderBackupBanner() {
+  const el = $("#backupbanner");
+  if (!el) return;
+  const info = backupInfo;
+  const due = info && info.configured && info.is_due && !backupDismissed;
+  if (!due) { el.innerHTML = ""; return; }
+  el.innerHTML = `<div class="banner static backupbanner">
+    ${icon("cloudup")}
+    <span class="bannertext"><strong>Time to back up</strong> — ${esc(backupReminderText(info))}</span>
+    <span class="bannerbtns">
+      <button type="button" class="textbtn" id="bk-now">Back up now</button>
+      <button type="button" class="textbtn" id="bk-dismiss">Dismiss</button>
+    </span>
+  </div>`;
+  $("#bk-now").addEventListener("click", async () => {
+    await doBackupNow();
+    renderBackupBanner();
+  });
+  $("#bk-dismiss").addEventListener("click", () => {
+    backupDismissed = true;
+    renderBackupBanner();
+  });
+}
+
+// Restore flow: list backups, pick a strategy, confirm. Built on demand.
+async function openRestore() {
+  if (!backupInfo || !backupInfo.configured) { toast("Set up backup first"); return; }
+  let backups;
+  try {
+    backups = (await api("/api/backup/list")).backups || [];
+  } catch (err) {
+    toast("Could not list backups: " + err.message, "error");
+    return;
+  }
+  if (!backups.length) { toast("No backups found in the destination yet"); return; }
+  let dlg = $("#restoredlg");
+  if (!dlg) {
+    dlg = document.createElement("dialog");
+    dlg.id = "restoredlg";
+    dlg.className = "dlg formdlg";
+    document.body.appendChild(dlg);
+  }
+  let picked = backups[0].name;
+  let strategy = "merge_skip";
+  const STRAT = [
+    ["merge_skip", "Merge — keep mine", "Add new materials from the backup; keep my versions of any that clash."],
+    ["merge_overwrite", "Merge — use backup", "Add new materials and replace my versions with the backup's."],
+    ["replace_all", "Replace everything", "Move my current library aside and restore the backup wholesale."],
+  ];
+  function paintRestore() {
+    dlg.innerHTML = `
+      <h2>Restore from backup</h2>
+      <p class="dlg-sub">Your current library is backed up automatically first, so this is undoable.</p>
+      <label class="field"><span>Backup</span>
+        <select id="rs-pick">${backups.map(b =>
+          `<option value="${esc(b.name)}">${esc(b.name.replace(/^lesson-library-backup-/, "").replace(/\.zip$/, ""))}${
+            b.size_bytes ? " · " + fmtSize(b.size_bytes) : ""}</option>`).join("")}</select>
+      </label>
+      <div class="field"><span>How to merge</span>
+        <div class="stratlist">${STRAT.map(([k, label, desc]) =>
+          `<button type="button" class="stratopt ${k === strategy ? "on" : ""}" data-strat="${k}">
+            <span class="stratmark">${icon(k === strategy ? "circlecheck" : "circle")}</span>
+            <span class="stratcol"><span class="strattitle">${esc(label)}</span>
+              <span class="stratdesc">${esc(desc)}</span></span>
+          </button>`).join("")}</div>
+      </div>
+      <div class="dlg-actions">
+        <button type="button" id="rs-cancel" class="btn">Cancel</button>
+        <button type="button" id="rs-go" class="btn primary">Restore</button>
+      </div>`;
+    $("#rs-pick").addEventListener("change", e => { picked = e.target.value; });
+    $$(".stratopt", dlg).forEach(b => b.addEventListener("click", () => {
+      strategy = b.dataset.strat; paintRestore();
+    }));
+    $("#rs-cancel").addEventListener("click", () => dlg.close());
+    $("#rs-go").addEventListener("click", onRestore);
+  }
+  async function onRestore() {
+    const destructive = strategy === "replace_all";
+    const ok = await confirmDialog({
+      title: destructive ? "Replace your whole library?" : "Restore from backup?",
+      message: destructive
+        ? "Your current library moves to a Trash-restore folder first, then the backup is restored. You can undo by moving it back."
+        : "New materials are added from the backup. Your current library is backed up first.",
+      confirmLabel: "Restore",
+    });
+    if (!ok) return;
+    dlg.close();
+    toast("Restoring…", "ok", { duration: 2000 });
+    try {
+      const out = await api("/api/backup/restore", { method: "POST",
+        body: formBody({ backup_name: picked, strategy }) });
+      await refresh();
+      await refreshBackupInfo();
+      render();
+      const parts = [];
+      if (out.restored) parts.push(`${out.restored.length} restored`);
+      if (out.added) parts.push(`${out.added.length} added`);
+      if (out.overwritten && out.overwritten.length) parts.push(`${out.overwritten.length} replaced`);
+      if (out.skipped && out.skipped.length) parts.push(`${out.skipped.length} kept`);
+      let msg = "Restore complete" + (parts.length ? " — " + parts.join(", ") : "");
+      toast(msg);
+      if (out.conflicts && out.conflicts.length) {
+        toast(`${out.conflicts.length} material${out.conflicts.length === 1 ? "" : "s"} differed between devices — review them`, "error", { duration: 8000 });
+      }
+    } catch (err) {
+      toast("Restore failed: " + err.message, "error");
+    }
+  }
+  paintRestore();
+  openDialog(dlg);
+}
+
+function backupDestinationLabel(info) {
+  if (info.destination_type === "saf") return "Cloud folder (Drive / SAF)";
+  if (info.destination_type === "local") return info.destination_path || "Local folder";
+  return "";
+}
+
+function backupSettingsHTML() {
+  const info = backupInfo;
+  if (!info) return `<p class="hint">Checking backup status…</p>`;
+  if (!info.configured) {
+    return `<p class="hint">Keep a copy of your whole library on Google Drive
+      (or any cloud) and restore it on another phone. Nothing leaves your
+      device until you connect a destination.</p>
+      ${onAndroid()
+        ? `<button id="bk-pick" class="btn primary wide" type="button">${icon("cloud")}<span>Choose a Drive folder…</span></button>`
+        : `<label class="field"><span>Backup folder path</span>
+            <input type="text" id="bk-path" autocomplete="off" spellcheck="false"
+                   placeholder="e.g. /sdcard/Download/lesson-backups">
+           </label>
+           <button id="bk-connect" class="btn primary wide" type="button">${icon("cloud")}<span>Connect this folder</span></button>
+           <p class="hint">On Termux/desktop, point this at a folder your own
+             sync tool (rclone, Insync…) keeps on Drive.</p>`}`;
+  }
+  const last = info.last_backup_at
+    ? `Last backup ${relDate(info.last_backup_at)}${info.last_backup_size_bytes ? " · " + fmtSize(info.last_backup_size_bytes) : ""}`
+    : "Never backed up yet";
+  const reminderOpts = [["0", "Never"], ["3", "Every 3 days"], ["7", "Weekly"],
+                        ["14", "Every 2 weeks"], ["30", "Monthly"]];
+  const autoOpts = [["never", "Off"], ["weekly", "Weekly"],
+                    ["after_n_materials", "After N new materials"]];
+  const nOpts = ["5", "10", "20"];
+  const rd = String(info.reminder_days == null ? 7 : info.reminder_days);
+  const af = info.auto_frequency || "never";
+  const nv = String(info.after_n_value || 10);
+  return `
+    <div class="bkstat"><span class="bkdot ${info.is_due ? "due" : "ok"}"></span>
+      <span>${esc(last)}</span></div>
+    <p class="hint">Destination: <b>${esc(backupDestinationLabel(info))}</b></p>
+    <div class="bkrow">
+      <button id="bk-now" class="btn primary" type="button">${icon("cloudup")}<span>Back up now</span></button>
+      <button id="bk-restore" class="btn" type="button">${icon("cloud")}<span>Restore…</span></button>
+    </div>
+    <label class="field"><span>Remind me to back up</span>
+      <select id="bk-remind">${reminderOpts.map(([v, l]) =>
+        `<option value="${v}" ${v === rd ? "selected" : ""}>${l}</option>`).join("")}</select>
+    </label>
+    <label class="field"><span>Auto-backup</span>
+      <select id="bk-auto">${autoOpts.map(([v, l]) =>
+        `<option value="${v}" ${v === af ? "selected" : ""}>${l}</option>`).join("")}</select>
+    </label>
+    <label class="field" id="bk-nfield" ${af === "after_n_materials" ? "" : "hidden"}>
+      <span>After how many new materials</span>
+      <select id="bk-n">${nOpts.map(v =>
+        `<option value="${v}" ${v === nv ? "selected" : ""}>${v}</option>`).join("")}</select>
+    </label>
+    <button id="bk-disconnect" class="textbtn wide" type="button">Disconnect</button>`;
+}
+
+function wireBackupSettings() {
+  const pick = $("#bk-pick");
+  if (pick) pick.addEventListener("click", () => {
+    try { MLBridge.pickBackupFolder(); }
+    catch (e) { toast("Folder picker unavailable", "error"); }
+  });
+  const connect = $("#bk-connect");
+  if (connect) connect.addEventListener("click", async () => {
+    const path = $("#bk-path").value.trim();
+    if (!path) { toast("Enter a folder path"); return; }
+    try {
+      await putBackupConfig({ destination_type: "local", destination_path: path });
+      toast("Backup folder connected");
+      renderSettings();
+    } catch (err) { toast("Could not connect: " + err.message, "error"); }
+  });
+  const now = $("#bk-now");
+  if (now) now.addEventListener("click", async () => { await doBackupNow(); renderSettings(); });
+  const restore = $("#bk-restore");
+  if (restore) restore.addEventListener("click", openRestore);
+  const disc = $("#bk-disconnect");
+  if (disc) disc.addEventListener("click", async () => {
+    const ok = await confirmDialog({
+      title: "Disconnect backup?",
+      message: "This stops backups and forgets the destination. Backups " +
+        "already saved there are not deleted.",
+      confirmLabel: "Disconnect" });
+    if (!ok) return;
+    try {
+      await api("/api/backup/disconnect", { method: "POST", body: formBody({}) });
+      if (window.MLBridge && typeof MLBridge.forgetBackupFolder === "function") {
+        try { MLBridge.forgetBackupFolder(); } catch (e) { /* off-device */ }
+      }
+      await refreshBackupInfo();
+      renderSettings();
+      toast("Backup disconnected");
+    } catch (err) { toast(err.message, "error"); }
+  });
+  const remind = $("#bk-remind");
+  if (remind) remind.addEventListener("change", () => {
+    putBackupConfig({ reminder_days: parseInt(remind.value, 10) }).catch(() => {});
+  });
+  const auto = $("#bk-auto");
+  if (auto) auto.addEventListener("change", () => {
+    const f = $("#bk-nfield"); if (f) f.hidden = auto.value !== "after_n_materials";
+    putBackupConfig({ auto_frequency: auto.value,
+                      after_n_value: parseInt(($("#bk-n") || { value: "10" }).value, 10) })
+      .catch(() => {});
+  });
+  const n = $("#bk-n");
+  if (n) n.addEventListener("change", () => {
+    putBackupConfig({ auto_frequency: "after_n_materials",
+                      after_n_value: parseInt(n.value, 10) }).catch(() => {});
+  });
 }
 
 // ---- settings view ----
@@ -3392,11 +3719,15 @@ function renderSettings() {
     </div>
 
     <div class="formcard">
-      <h3>${icon("download")}Backup</h3>
-      <p class="hint">Everything lives in plain folders at
-        <b id="set-dir">…</b>, so your file manager, USB transfer, and Drive
-        backup already see every file. The CSV export adds a
-        spreadsheet-friendly index of all metadata.</p>
+      <h3>${icon("cloud")}Backup &amp; restore</h3>
+      <div id="backupcard">${backupSettingsHTML()}</div>
+    </div>
+
+    <div class="formcard">
+      <h3>${icon("download")}Export</h3>
+      <p class="hint">Everything also lives in plain folders at
+        <b id="set-dir">…</b>, so your file manager and USB transfer see every
+        file. The CSV export adds a spreadsheet-friendly index of all metadata.</p>
       <a class="btn wide" href="/api/export.csv" target="_blank" rel="noopener">
         ${icon("download")}<span>Export index as CSV</span></a>
     </div>`;
@@ -3418,6 +3749,13 @@ function renderSettings() {
       toast("Rescan failed: " + err.message, "error");
       btn.disabled = false;
     }
+  });
+
+  wireBackupSettings();
+  refreshBackupInfo().then(() => {
+    if (route().view !== "settings") return;
+    const c = $("#backupcard");
+    if (c) { c.innerHTML = backupSettingsHTML(); wireBackupSettings(); }
   });
 
   api("/api/health").then(h => {
@@ -4060,6 +4398,9 @@ function initPullToRefresh() {
     await refresh();
     lastScanTs = Date.now();
     render();
+    refreshBackupInfo().then(() => {
+      if (route().view === "list") renderBackupBanner();
+    });
   } catch (err) {
     view.innerHTML = `
       <div class="emptystate">

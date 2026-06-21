@@ -10,7 +10,8 @@ reference: [README.md](README.md).
 1. **Never rename** the `LessonLibrary/` data folder, the `lessons/`
    subfolder, the `lesson.json` sidecar filename, or the `/api/lessons`
    routes. They predate the "material" terminology; existing phones depend
-   on them. (`plans/`, `plan.json`, `Inbox/`, `Trash/` are now contracts too.)
+   on them. (`plans/`, `plan.json`, `Inbox/`, `Trash/`, and the optional
+   `backup.json` at the data root are now contracts too.)
 2. **Folder name = record id, and the folder wins** over the id stored in
    json. Never invent another id source.
 3. **Every JSON write** goes through `write_sidecar_json` (tmp → fsync →
@@ -21,7 +22,13 @@ reference: [README.md](README.md).
 5. **No external resources, ever** — no CDNs, fonts, icon packs, network
    calls. Inline SVG + system fonts only. **Flask stays the only Python
    dependency**; the Android build kit is offline, so no new
-   Gradle/Java dependencies either.
+   Gradle/Java dependencies either. **Scoped exception (Feature E only):**
+   network/cloud access is permitted ONLY within the backup feature
+   (`/api/backup/*` routes), ONLY when the teacher has explicitly configured
+   a destination, and ONLY through the SAF bridge (`BackupBridge.java`) or a
+   local filesystem path. No other feature may make network calls, and the
+   no-new-dependencies rule is NOT relaxed — backup uses stdlib `zipfile`
+   plus the framework `DocumentsContract`, nothing new.
 6. **Windows-safe filenames + case-insensitive collision checks** everywhere
    (the phone's filesystem is case-insensitive; the dev machine is Windows).
 7. **v1 sidecars**: normalize on read, rewrite as v2 only on user save.
@@ -37,7 +44,7 @@ reference: [README.md](README.md).
 
 ```powershell
 # from lesson-library/
-py tests\test_server.py                                          # 69 tests, must stay green
+py tests\test_server.py                                          # 99 tests, must stay green
 $env:LESSONLIB_DATA_DIR='C:\tmp\matlib'; py server.py            # run locally
 powershell -ExecutionPolicy Bypass -File .\android\build-apk.ps1 # build APK (offline kit)
 ```

@@ -947,6 +947,139 @@ class TestInboxBatchAndImport(LibraryTestCase):
             self.assertNotIn(rec["id"], server.STATE["lessons"])
 
 
+class TestBackup(LibraryTestCase):
+    """Feature E: zip/restore, merge strategies, config, and the 503 gate."""
+
+    def setUp(self):
+        super().setUp()
+        self.dest = self.data / "drive"
+        self.dest.mkdir()
+
+    def configure(self, **over):
+        body = {"destination_type": "local",
+                "destination_path": str(self.dest)}
+        body.update(over)
+        return self.client.put("/api/backup/config", json=body)
+
+    def test_routes_503_until_configured(self):
+        for path in ("/api/backup/status", "/api/backup/list"):
+            self.assertEqual(self.client.get(path).status_code, 503)
+        self.assertEqual(self.client.post("/api/backup/now").status_code, 503)
+        self.assertEqual(self.client.post(
+            "/api/backup/restore",
+            data={"backup_name": "x", "strategy": "merge_skip"},
+            content_type="multipart/form-data").status_code, 503)
+        # the rest of the app is unaffected
+        self.assertEqual(self.client.get("/api/lessons").status_code, 200)
+        self.assertFalse((self.data / "backup.json").exists())
+
+    def test_backup_now_writes_valid_zip(self):
+        self.create_material(title="Zipped",
+                             files=[(io.BytesIO(b"hello"), "a.pdf")])
+        self.configure()
+        out = self.client.post("/api/backup/now").get_json()
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["material_count"], 1)
+        zips = list(self.dest.glob("lesson-library-backup-*.zip"))
+        self.assertEqual(len(zips), 1)
+        import zipfile
+        with zipfile.ZipFile(zips[0]) as zf:
+            self.assertIsNone(zf.testzip())
+            names = zf.namelist()
+            self.assertIn("lessons/zipped/a.pdf", names)
+            self.assertIn("lessons/zipped/lesson.json", names)
+            self.assertIn("health.json", names)
+
+    def make_backup(self):
+        self.configure()
+        return self.client.post("/api/backup/now").get_json()["name"]
+
+    def test_restore_replace_all_moves_current_aside(self):
+        self.create_material(title="Keeper")
+        name = self.make_backup()
+        # add a material that exists only locally (not in the backup)
+        self.create_material(title="Local only")
+        out = self.client.post(
+            "/api/backup/restore",
+            data={"backup_name": name, "strategy": "replace_all"},
+            content_type="multipart/form-data").get_json()
+        self.assertTrue(out["moved_aside"].startswith("Trash-restore-"))
+        self.assertTrue((self.data / out["moved_aside"]).is_dir())
+        # only the backed-up material remains
+        ids = set(server.STATE["lessons"])
+        self.assertIn("keeper", ids)
+        self.assertNotIn("local-only", ids)
+
+    def test_restore_merge_skip_keeps_existing(self):
+        self.create_material(title="Shared")
+        name = self.make_backup()
+        # change the local copy after the backup
+        self.client.post("/api/lessons/shared",
+                         data={"title": "Shared", "notes": "edited locally"},
+                         content_type="multipart/form-data")
+        self.client.post(
+            "/api/backup/restore",
+            data={"backup_name": name, "strategy": "merge_skip"},
+            content_type="multipart/form-data")
+        self.assertEqual(self.disk_json("shared")["notes"], "edited locally")
+
+    def test_restore_merge_overwrite_replaces_existing(self):
+        self.create_material(title="Shared")
+        name = self.make_backup()
+        self.client.post("/api/lessons/shared",
+                         data={"title": "Shared", "notes": "edited locally"},
+                         content_type="multipart/form-data")
+        self.client.post(
+            "/api/backup/restore",
+            data={"backup_name": name, "strategy": "merge_overwrite"},
+            content_type="multipart/form-data")
+        # the backup had no notes, so overwrite wipes the local edit
+        self.assertEqual(self.disk_json("shared")["notes"], "")
+
+    def test_conflict_detection(self):
+        self.create_material(title="Shared")
+        name = self.make_backup()
+        self.client.post("/api/lessons/shared",
+                         data={"title": "Shared", "notes": "diverged"},
+                         content_type="multipart/form-data")
+        out = self.client.post(
+            "/api/backup/restore",
+            data={"backup_name": name, "strategy": "merge_skip"},
+            content_type="multipart/form-data").get_json()
+        self.assertIn("shared", out["conflicts"])
+
+    def test_materials_added_counter_increments_and_resets(self):
+        self.configure()
+        self.create_material(title="One")
+        self.create_material(title="Two")
+        cfg = json.loads((self.data / "backup.json").read_text())
+        self.assertEqual(cfg["materials_added_since_last_backup"], 2)
+        self.client.post("/api/backup/now")
+        cfg = json.loads((self.data / "backup.json").read_text())
+        self.assertEqual(cfg["materials_added_since_last_backup"], 0)
+
+    def test_is_due_for_reminder_and_after_n(self):
+        self.configure(reminder_days=7, auto_frequency="after_n_materials",
+                       after_n_value=2)
+        # never backed up -> due on the reminder
+        self.assertTrue(self.client.get(
+            "/api/backup/status").get_json()["is_due"])
+        self.client.post("/api/backup/now")
+        status = self.client.get("/api/backup/status").get_json()
+        self.assertFalse(status["is_due"])
+        # two new materials hits the after-N threshold
+        self.create_material(title="A")
+        self.create_material(title="B")
+        self.assertTrue(self.client.get(
+            "/api/backup/status").get_json()["is_due"])
+
+    def test_disconnect_clears_destination(self):
+        self.configure()
+        self.client.post("/api/backup/disconnect")
+        self.assertEqual(self.client.get(
+            "/api/backup/status").status_code, 503)
+
+
 class TestHealthAndMaintenance(LibraryTestCase):
     def test_health_reports_untagged_and_sizes(self):
         self.create_material(title="Tagged", topics=["Animals"],
