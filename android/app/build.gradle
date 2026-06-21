@@ -1,0 +1,80 @@
+plugins {
+    id "com.android.application"
+    id "com.chaquo.python"
+}
+
+// Signing secrets live in android/keystore.properties (gitignored). If it is
+// absent (a fresh fork/clone), fall back to a throwaway default that matches
+// the keystore build-apk.ps1 auto-generates. See keystore.properties.example.
+def keystoreProps = new Properties()
+def keystorePropsFile = rootProject.file("keystore.properties")
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+
+android {
+    namespace "com.lessonlibrary.app"
+    compileSdk 35
+
+    signingConfigs {
+        lessonLibrary {
+            storeFile file("../lesson-library.keystore")
+            storePassword keystoreProps.getProperty("storePassword", "android")
+            keyAlias keystoreProps.getProperty("keyAlias", "lessonlibrary")
+            keyPassword keystoreProps.getProperty("keyPassword", "android")
+        }
+    }
+
+    defaultConfig {
+        applicationId "com.lessonlibrary.app"
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName "1.0"
+
+        ndk {
+            abiFilters "arm64-v8a", "armeabi-v7a"
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.lessonLibrary
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.lessonLibrary
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"),
+                    "proguard-rules.pro"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.fork = true
+    options.forkOptions.executable =
+            new File(System.getenv("JAVA_HOME"), "bin/javac.exe").absolutePath
+}
+
+chaquopy {
+    defaultConfig {
+        version = "3.11"
+        // Gradle's auto-detection only finds interpreters registered with the
+        // Windows `py` launcher. When that fails (e.g. a uv-managed 3.11),
+        // build-apk.ps1 passes the exact interpreter path through here.
+        def buildPy = project.findProperty("chaquopyPython") ?:
+                System.getenv("CHAQUOPY_PYTHON")
+        if (buildPy) {
+            buildPython buildPy.toString()
+        }
+        pip {
+            options("--no-cache-dir")
+            install("Flask==3.1.2")
+        }
+    }
+}

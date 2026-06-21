@@ -1,0 +1,29 @@
+# Offline Android build kit (~1.9 GB, regenerable / downloaded separately)
+/.android-tools/
+
+# Android build outputs
+android/app/build/
+android/build/
+android/.gradle/
+
+# APK signing key — NEVER publish. The owner keeps a private backup; forks
+# auto-generate their own on first build (see android/build-apk.ps1).
+*.keystore
+android/keystore.properties
+
+# Prebuilt APK — distributed via GitHub Releases, not committed
+*.apk
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Runtime data — a real person's library; must never be committed
+/LessonLibrary/
+matlib-demo/
+
+# Local agent / IDE scratch
+.codex/
+.agents/
+.claude/*
+!.claude/launch.json

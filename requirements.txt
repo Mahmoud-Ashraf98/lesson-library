@@ -1,0 +1,5 @@
+# The server's only runtime dependency. Keep this list at one line — the whole
+# project is built around Flask being the sole Python dependency (see CLAUDE.md
+# invariant #5). Pinned to match the version bundled into the APK (android/app/
+# build.gradle). The test suite needs nothing beyond this + the standard library.
+Flask==3.1.2

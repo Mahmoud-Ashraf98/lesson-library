@@ -1,0 +1,33 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: ${{ matrix.os }} · py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows is the dev target; Ubuntu adds breadth. The suite is
+        # stdlib-only and tests app logic (not filesystem case behavior),
+        # so it should be green on both.
+        os: [ubuntu-latest, windows-latest]
+        python-version: ['3.11']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python tests/test_server.py

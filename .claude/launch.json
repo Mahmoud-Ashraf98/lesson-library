@@ -1,0 +1,15 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "material-library",
+      "runtimeExecutable": "powershell",
+      "runtimeArgs": [
+        "-NoProfile",
+        "-Command",
+        "$env:LESSONLIB_DATA_DIR = \"$env:TEMP\\matlib-demo\"; py server.py"
+      ],
+      "port": 8077
+    }
+  ]
+}

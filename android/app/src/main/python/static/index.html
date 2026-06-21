@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta id="thememeta" name="theme-color" content="#F6F4FC">
+<title>Material Library</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-view="list">
+<header class="appbar">
+  <div class="brand">
+    <span class="brandmark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4h6a4 4 0 0 1 4 4v13a3 3 0 0 0-3-3H2z"/><path d="M22 4h-6a4 4 0 0 0-4 4v13a3 3 0 0 1 3-3h7z"/></svg>
+    </span>
+    <div class="brandcol">
+      <h1>Material Library</h1>
+      <span class="brandsub">Organized, ready to teach</span>
+    </div>
+  </div>
+  <a id="settingsbtn" class="iconbtn" href="#/settings" aria-label="Settings" title="Settings">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+  </a>
+</header>
+
+<main id="view" tabindex="-1"><p class="empty">Loading…</p></main>
+
+<button id="fab" class="fab" type="button">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+  <span id="fablabel">Add material</span>
+</button>
+
+<nav class="bottomnav" aria-label="Main navigation">
+  <a href="#/" data-nav="library" class="on">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4h6a4 4 0 0 1 4 4v13a3 3 0 0 0-3-3H2z"/><path d="M22 4h-6a4 4 0 0 0-4 4v13a3 3 0 0 1 3-3h7z"/></svg>
+    <span>Library</span>
+  </a>
+  <a href="#/plans" data-nav="plans">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/><path d="m9 16 2 2 4-4"/></svg>
+    <span>Classes</span>
+  </a>
+  <a href="#/inbox" data-nav="inbox">
+    <span class="navicon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
+      <span class="navbadge" id="inboxbadge" hidden></span>
+    </span>
+    <span>Inbox</span>
+  </a>
+</nav>
+
+<div id="toasts" aria-live="polite"></div>
+
+<dialog id="confirmdlg" class="dlg">
+  <div class="dlg-icon" aria-hidden="true">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+  </div>
+  <h2 id="cd-title">Are you sure?</h2>
+  <p id="cd-msg"></p>
+  <div class="dlg-actions">
+    <button id="cd-cancel" class="btn" type="button">Cancel</button>
+    <button id="cd-ok" class="btn danger-solid" type="button">Delete</button>
+  </div>
+</dialog>
+
+<dialog id="plandlg" class="dlg formdlg">
+  <h2 id="pd-heading">New plan</h2>
+  <form id="pd-form">
+    <label class="field"><span>Title *</span>
+      <input type="text" id="pd-name" required autocomplete="off" placeholder="e.g. Tuesday 18:00 — B2 teens">
+    </label>
+    <label class="field"><span>Class / group</span>
+      <input type="text" id="pd-group" autocomplete="off" list="groupsdl" placeholder="e.g. B2 evening group">
+    </label>
+    <label class="field"><span>Date</span>
+      <input type="date" id="pd-date">
+    </label>
+    <label class="field"><span>Notes</span>
+      <textarea id="pd-notes" placeholder="aims, reminders…"></textarea>
+    </label>
+    <div class="dlg-actions">
+      <button type="button" id="pd-cancel" class="btn">Cancel</button>
+      <button type="submit" id="pd-save" class="btn primary">Create</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="usagedlg" class="dlg formdlg">
+  <h2>Log use</h2>
+  <p id="ud-mat" class="dlg-sub"></p>
+  <form id="ud-form">
+    <label class="field"><span>Date</span>
+      <input type="date" id="ud-date">
+    </label>
+    <label class="field"><span>Class / group</span>
+      <input type="text" id="ud-group" autocomplete="off" list="groupsdl" placeholder="e.g. B2 evening group">
+    </label>
+    <label class="field"><span>Note</span>
+      <input type="text" id="ud-note" autocomplete="off" placeholder="e.g. great as a warmer">
+    </label>
+    <div class="dlg-actions">
+      <button type="button" id="ud-cancel" class="btn">Cancel</button>
+      <button type="submit" id="ud-save" class="btn primary">Log use</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="fileeditdlg" class="dlg formdlg">
+  <h2>Edit file</h2>
+  <form id="fe-form">
+    <label class="field"><span>File name</span>
+      <input type="text" id="fe-name" autocomplete="off" spellcheck="false" placeholder="e.g. Unit 4 — reading.pdf">
+    </label>
+    <label class="field"><span>Note</span>
+      <input type="text" id="fe-note" autocomplete="off" placeholder="e.g. Student handout">
+    </label>
+    <div class="dlg-actions fe-actions">
+      <button type="button" id="fe-remove" class="btn danger">Remove from material</button>
+      <button type="button" id="fe-cancel" class="btn">Cancel</button>
+      <button type="submit" id="fe-save" class="btn primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="plansheet" class="dlg formdlg">
+  <h2>Add to plan</h2>
+  <p id="ps-mat" class="dlg-sub"></p>
+  <div id="ps-list" class="sheetlist"></div>
+  <div class="dlg-actions">
+    <button id="ps-cancel" class="btn" type="button">Cancel</button>
+    <button id="ps-new" class="btn primary" type="button">New plan…</button>
+  </div>
+</dialog>
+
+<dialog id="sharesheet" class="dlg formdlg">
+  <h2>Share files</h2>
+  <p id="sh-mat" class="dlg-sub"></p>
+  <div id="sh-list" class="sheetlist"></div>
+  <div class="dlg-actions">
+    <button id="sh-cancel" class="btn" type="button">Cancel</button>
+    <button id="sh-ok" class="btn primary" type="button">Share</button>
+  </div>
+</dialog>
+
+<dialog id="matpicker" class="dlg formdlg">
+  <h2>Add to material</h2>
+  <p id="mp-sub" class="dlg-sub"></p>
+  <div class="searchbox dlgsearch">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+    <input id="mp-q" type="search" autocomplete="off" placeholder="Search your library…" aria-label="Search materials">
+  </div>
+  <div id="mp-list" class="sheetlist"></div>
+  <div class="dlg-actions">
+    <button id="mp-cancel" class="btn" type="button">Cancel</button>
+  </div>
+</dialog>
+
+<dialog id="lightbox" class="lightboxdlg">
+  <img id="lb-img" alt="">
+  <div class="lb-bar">
+    <span id="lb-name"></span>
+    <button id="lb-share" class="iconbtn" type="button" aria-label="Share this image" title="Share">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="13.5" x2="15.4" y2="17.5"/><line x1="15.4" y1="6.5" x2="8.6" y2="10.5"/></svg>
+    </button>
+    <a id="lb-open" class="iconbtn" target="_blank" rel="noopener" aria-label="Open in another app" title="Open externally">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
+    </a>
+    <button id="lb-close" class="iconbtn" type="button" aria-label="Close preview" title="Close">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+    </button>
+  </div>
+</dialog>
+
+<datalist id="groupsdl"></datalist>
+
+<noscript><p class="empty">This app needs JavaScript enabled.</p></noscript>
+<script src="/static/app.js"></script>
+</body>
+</html>

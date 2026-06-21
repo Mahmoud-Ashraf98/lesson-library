@@ -1,0 +1,288 @@
+{
+  "version": 1,
+  "comment": "Curated catalog for the Material Library comboboxes. Custom values typed by the teacher live in lesson.json records, not here; the server merges them in as a 'Your library' group.",
+  "grammar_points": [
+    {
+      "group": "Foundations",
+      "options": [
+        "Be: present and past",
+        "Have / have got",
+        "There is / there are",
+        "Subject and object pronouns",
+        "Possessive adjectives and pronouns",
+        "Demonstratives",
+        "Singular and plural nouns",
+        "Articles: a, an, the, and zero article",
+        "Imperatives"
+      ]
+    },
+    {
+      "group": "Present time",
+      "options": [
+        "Present simple",
+        "Present continuous",
+        "Present simple vs present continuous",
+        "Stative verbs"
+      ]
+    },
+    {
+      "group": "Past time",
+      "options": [
+        "Past simple",
+        "Past continuous",
+        "Past simple vs past continuous",
+        "Used to and would",
+        "Past perfect",
+        "Past perfect continuous"
+      ]
+    },
+    {
+      "group": "Perfect aspect",
+      "options": [
+        "Present perfect simple",
+        "Present perfect continuous",
+        "Present perfect vs past simple",
+        "Present perfect simple vs continuous"
+      ]
+    },
+    {
+      "group": "Future time",
+      "options": [
+        "Will",
+        "Be going to",
+        "Present continuous for future arrangements",
+        "Present simple for schedules",
+        "Future forms comparison",
+        "Future continuous",
+        "Future perfect"
+      ]
+    },
+    {
+      "group": "Modals and related forms",
+      "options": [
+        "Ability",
+        "Permission and requests",
+        "Obligation and necessity",
+        "Prohibition",
+        "Advice",
+        "Possibility and probability",
+        "Speculation and deduction",
+        "Past modals"
+      ]
+    },
+    {
+      "group": "Conditionals and unreal meaning",
+      "options": [
+        "Zero conditional",
+        "First conditional",
+        "Second conditional",
+        "Third conditional",
+        "Mixed conditionals",
+        "Wish and if only"
+      ]
+    },
+    {
+      "group": "Nouns and determiners",
+      "options": [
+        "Countable and uncountable nouns",
+        "Quantifiers",
+        "Some, any, no, and every compounds",
+        "Articles and determiners"
+      ]
+    },
+    {
+      "group": "Adjectives and adverbs",
+      "options": [
+        "Comparatives",
+        "Superlatives",
+        "Adjective order",
+        "Adverbs of frequency",
+        "Adverbs of manner and degree",
+        "So, such, too, and enough"
+      ]
+    },
+    {
+      "group": "Verb patterns",
+      "options": [
+        "Gerunds and infinitives",
+        "Verb + object + infinitive",
+        "Make and let",
+        "Have / get something done",
+        "Phrasal verb grammar"
+      ]
+    },
+    {
+      "group": "Clauses and sentence building",
+      "options": [
+        "Defining relative clauses",
+        "Non-defining relative clauses",
+        "Clauses of purpose",
+        "Clauses of reason and result",
+        "Clauses of contrast and concession",
+        "Participle clauses",
+        "Linking words and discourse markers"
+      ]
+    },
+    {
+      "group": "Voice and reporting",
+      "options": [
+        "Passive voice",
+        "Passive reporting structures",
+        "Reported statements",
+        "Reported questions and commands",
+        "Reporting verbs"
+      ]
+    },
+    {
+      "group": "Questions and emphasis",
+      "options": [
+        "Yes/no and wh- questions",
+        "Direct and indirect questions",
+        "Question tags",
+        "Negative forms",
+        "Auxiliary verbs for emphasis",
+        "Inversion"
+      ]
+    }
+  ],
+  "vocab_focuses": [
+    {
+      "group": "Common lexical sets",
+      "options": [
+        "Personal information",
+        "Countries and nationalities",
+        "Family and friends",
+        "Appearance and personality",
+        "Feelings and emotions",
+        "Daily routines and habits",
+        "House and home",
+        "Food and drink",
+        "Clothes and fashion",
+        "Shopping and money",
+        "Education and study",
+        "Jobs and work",
+        "Travel and transport",
+        "Holidays and tourism",
+        "Places, towns, and cities",
+        "Health and the body",
+        "Sport and exercise",
+        "Hobbies and free time",
+        "Entertainment and media",
+        "Communication and technology",
+        "Science and inventions",
+        "The natural world",
+        "Weather and climate",
+        "Environment",
+        "Society and community",
+        "Time and dates",
+        "Services"
+      ]
+    },
+    {
+      "group": "Lexical development",
+      "options": [
+        "Collocations",
+        "Phrasal verbs",
+        "Word formation",
+        "Prefixes and suffixes",
+        "Compound words",
+        "Word families",
+        "Synonyms and antonyms",
+        "Multiple meanings",
+        "Idioms",
+        "Fixed expressions and chunks",
+        "Academic vocabulary",
+        "Business and workplace vocabulary",
+        "Functional language"
+      ]
+    }
+  ],
+  "topics": [
+    {
+      "group": "Topics",
+      "options": [
+        "Personal identity",
+        "Family and relationships",
+        "Home and everyday life",
+        "Food and lifestyle",
+        "Education and learning",
+        "Work and careers",
+        "Travel and tourism",
+        "Places and communities",
+        "Culture and traditions",
+        "Arts and entertainment",
+        "Media and communication",
+        "Science and discovery",
+        "Technology",
+        "Health and wellbeing",
+        "Sport and leisure",
+        "Shopping and consumer life",
+        "Money and business",
+        "Nature and wildlife",
+        "Weather and climate",
+        "Environment",
+        "History",
+        "Society and social issues",
+        "The future",
+        "Global issues"
+      ]
+    }
+  ],
+  "themes": [
+    {
+      "group": "Themes",
+      "options": [
+        "Identity and belonging",
+        "Change and adaptation",
+        "Choices and consequences",
+        "Challenge, risk, and resilience",
+        "Communication and connection",
+        "Community and cooperation",
+        "Culture and diversity",
+        "Creativity and innovation",
+        "Discovery and exploration",
+        "Environment and sustainability",
+        "Equality and inclusion",
+        "Ethics and responsibility",
+        "Globalization and interdependence",
+        "Health and wellbeing",
+        "Human achievement",
+        "Opportunity and ambition",
+        "Relationships",
+        "Technology and society",
+        "Tradition and modern life",
+        "Work and purpose"
+      ]
+    }
+  ],
+  "exam_targets": [
+    {
+      "group": "Cambridge English",
+      "options": [
+        "Cambridge English: Pre A1 Starters",
+        "Cambridge English: A1 Movers",
+        "Cambridge English: A2 Flyers",
+        "Cambridge English: A2 Key",
+        "Cambridge English: A2 Key for Schools",
+        "Cambridge English: B1 Preliminary",
+        "Cambridge English: B1 Preliminary for Schools",
+        "Cambridge English: B2 First",
+        "Cambridge English: B2 First for Schools",
+        "Cambridge English: C1 Advanced",
+        "Cambridge English: C2 Proficiency"
+      ]
+    },
+    {
+      "group": "International exams",
+      "options": [
+        "IELTS Academic",
+        "IELTS General Training",
+        "TOEFL iBT",
+        "TOEIC Listening and Reading",
+        "TOEIC Speaking and Writing",
+        "PTE Academic",
+        "Duolingo English Test"
+      ]
+    }
+  ]
+}
