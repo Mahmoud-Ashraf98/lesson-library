@@ -7,7 +7,9 @@ import android.provider.DocumentsContract;
 
 import org.json.JSONArray;
 
-import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 
@@ -71,7 +73,8 @@ public final class BackupBridge {
     }
 
     /** Python: write a backup file into the chosen folder. */
-    public static void writeBackupToUri(byte[] data, String displayName)
+    public static void writeBackupFileToUri(String sourcePath,
+                                            String displayName)
             throws Exception {
         Uri tree = treeUri();
         if (tree == null) {
@@ -83,13 +86,26 @@ public final class BackupBridge {
         if (doc == null) {
             throw new java.io.IOException("Could not create the backup file.");
         }
-        try (OutputStream out =
+        try (InputStream in = new FileInputStream(new File(sourcePath));
+             OutputStream out =
                      appContext.getContentResolver().openOutputStream(doc)) {
             if (out == null) {
                 throw new java.io.IOException("Could not open the backup file.");
             }
-            out.write(data);
+            byte[] buf = new byte[256 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+            }
             out.flush();
+        } catch (Exception e) {
+            try {
+                DocumentsContract.deleteDocument(
+                        appContext.getContentResolver(), doc);
+            } catch (Exception ignored) {
+                // Best effort: some providers do not support delete.
+            }
+            throw e;
         }
     }
 
@@ -123,8 +139,10 @@ public final class BackupBridge {
         return arr.toString();
     }
 
-    /** Python: read a named backup file's bytes. */
-    public static byte[] readBackupBytes(String displayName) throws Exception {
+    /** Python: stream a named backup file to a temporary local path. */
+    public static void readBackupFileToPath(String displayName,
+                                            String destinationPath)
+            throws Exception {
         Uri tree = treeUri();
         if (tree == null) {
             throw new IllegalStateException("No backup folder chosen.");
@@ -133,18 +151,23 @@ public final class BackupBridge {
         if (found == null) {
             throw new java.io.FileNotFoundException(displayName);
         }
+        File destination = new File(destinationPath);
         try (InputStream in =
-                     appContext.getContentResolver().openInputStream(found)) {
+                     appContext.getContentResolver().openInputStream(found);
+             OutputStream out = new FileOutputStream(destination)) {
             if (in == null) {
                 throw new java.io.IOException("Could not open the backup file.");
             }
-            ByteArrayOutputStream buf = new ByteArrayOutputStream();
-            byte[] tmp = new byte[256 * 1024];
+            byte[] buf = new byte[256 * 1024];
             int n;
-            while ((n = in.read(tmp)) > 0) {
-                buf.write(tmp, 0, n);
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
             }
-            return buf.toByteArray();
+            out.flush();
+        } catch (Exception e) {
+            //noinspection ResultOfMethodCallIgnored
+            destination.delete();
+            throw e;
         }
     }
 

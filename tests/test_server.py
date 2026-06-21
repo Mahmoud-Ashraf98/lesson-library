@@ -9,10 +9,13 @@ import io
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -994,6 +997,13 @@ class TestBackup(LibraryTestCase):
         self.configure()
         return self.client.post("/api/backup/now").get_json()["name"]
 
+    def write_backup_file(self, name, members):
+        path = self.dest / name
+        with zipfile.ZipFile(path, "w") as zf:
+            for member, content in members:
+                zf.writestr(member, content)
+        return path
+
     def test_restore_replace_all_moves_current_aside(self):
         self.create_material(title="Keeper")
         name = self.make_backup()
@@ -1078,6 +1088,181 @@ class TestBackup(LibraryTestCase):
         self.client.post("/api/backup/disconnect")
         self.assertEqual(self.client.get(
             "/api/backup/status").status_code, 503)
+
+    def test_backup_names_are_unique_and_legacy_names_remain_visible(self):
+        self.configure()
+        first = self.client.post("/api/backup/now").get_json()["name"]
+        second = self.client.post("/api/backup/now").get_json()["name"]
+        self.assertNotEqual(first, second)
+        self.assertRegex(first,
+                         r"^lesson-library-backup-\d{8}-\d{6}-\d{6}\.zip$")
+        legacy = "lesson-library-backup-20260102-030405.zip"
+        self.write_backup_file(legacy, [("health.json", "{}")])
+        names = {b["name"] for b in self.client.get(
+            "/api/backup/list").get_json()["backups"]}
+        self.assertIn(legacy, names)
+
+    def test_unsafe_archive_paths_are_rejected_without_touching_data(self):
+        self.create_material(title="Keeper")
+        self.configure()
+        unsafe = [
+            "lessons/../pwned.txt",
+            "/lessons/evil/a.txt",
+            "C:/lessons/evil/a.txt",
+            "unknown/evil/a.txt",
+        ]
+        for i, member in enumerate(unsafe):
+            with self.subTest(member=member):
+                name = f"lesson-library-backup-20260102-0304{i:02d}.zip"
+                self.write_backup_file(name, [(member, "bad")])
+                resp = self.client.post(
+                    "/api/backup/restore",
+                    data={"backup_name": name, "strategy": "merge_overwrite"},
+                    content_type="multipart/form-data")
+                self.assertEqual(resp.status_code, 400)
+                self.assertTrue((server.LESSONS_DIR / "keeper").is_dir())
+                self.assertFalse((self.data / "pwned.txt").exists())
+
+    def test_backslash_archive_member_is_rejected(self):
+        # zipfile's Windows writer normalizes backslashes before writing, so
+        # exercise the reader-side guard with the member shape Android/Linux
+        # would expose for a hand-crafted archive.
+        info = mock.Mock(filename="lessons\\evil\\lesson.json",
+                         external_attr=0, flag_bits=0)
+        info.is_dir.return_value = False
+        archive = mock.Mock()
+        archive.infolist.return_value = [info]
+        with self.assertRaises(server.UnsafeBackupError):
+            server.validate_backup_archive(archive)
+
+    def test_symlink_and_casefold_duplicate_members_are_rejected(self):
+        self.create_material(title="Keeper")
+        self.configure()
+        symlink_name = "lesson-library-backup-20260102-040000.zip"
+        symlink = zipfile.ZipInfo("lessons/link/lesson.json")
+        symlink.create_system = 3
+        symlink.external_attr = (stat.S_IFLNK | 0o777) << 16
+        with zipfile.ZipFile(self.dest / symlink_name, "w") as zf:
+            zf.writestr(symlink, "target")
+        duplicate_name = "lesson-library-backup-20260102-040001.zip"
+        self.write_backup_file(duplicate_name, [
+            ("lessons/Same/lesson.json", "{}"),
+            ("lessons/same/LESSON.JSON", "{}"),
+        ])
+        for name in (symlink_name, duplicate_name):
+            with self.subTest(name=name):
+                resp = self.client.post(
+                    "/api/backup/restore",
+                    data={"backup_name": name, "strategy": "merge_overwrite"},
+                    content_type="multipart/form-data")
+                self.assertEqual(resp.status_code, 400)
+                self.assertTrue((server.LESSONS_DIR / "keeper").is_dir())
+
+    def test_corrupt_archive_is_a_400_and_leaves_library_intact(self):
+        self.create_material(title="Keeper")
+        self.configure()
+        name = "lesson-library-backup-20260102-050000.zip"
+        (self.dest / name).write_bytes(b"not a zip")
+        resp = self.client.post(
+            "/api/backup/restore",
+            data={"backup_name": name, "strategy": "replace_all"},
+            content_type="multipart/form-data")
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue((server.LESSONS_DIR / "keeper").is_dir())
+
+    def test_safety_backup_failure_aborts_before_live_changes(self):
+        self.create_material(title="Shared")
+        name = self.make_backup()
+        self.client.post("/api/lessons/shared",
+                         data={"title": "Shared", "notes": "keep me"},
+                         content_type="multipart/form-data")
+        with mock.patch.object(server, "perform_backup",
+                               side_effect=OSError("destination unavailable")):
+            resp = self.client.post(
+                "/api/backup/restore",
+                data={"backup_name": name, "strategy": "merge_overwrite"},
+                content_type="multipart/form-data")
+        self.assertEqual(resp.status_code, 500)
+        self.assertEqual(self.disk_json("shared")["notes"], "keep me")
+
+    def test_merge_overwrite_rolls_back_if_install_fails(self):
+        self.create_material(title="Alpha")
+        self.create_material(title="Beta")
+        name = self.make_backup()
+        for lid in ("alpha", "beta"):
+            self.client.post(
+                "/api/lessons/" + lid,
+                data={"title": lid.title(), "notes": "local " + lid},
+                content_type="multipart/form-data")
+        original = server._install_staged_path
+
+        def fail_on_beta(source, target):
+            if target.name == "beta":
+                raise OSError("injected install failure")
+            return original(source, target)
+
+        with mock.patch.object(server, "_install_staged_path",
+                               side_effect=fail_on_beta):
+            resp = self.client.post(
+                "/api/backup/restore",
+                data={"backup_name": name, "strategy": "merge_overwrite"},
+                content_type="multipart/form-data")
+        self.assertEqual(resp.status_code, 500)
+        self.assertEqual(self.disk_json("alpha")["notes"], "local alpha")
+        self.assertEqual(self.disk_json("beta")["notes"], "local beta")
+
+    def test_replace_all_rolls_back_if_install_fails(self):
+        self.create_material(title="Keeper")
+        name = self.make_backup()
+        self.create_material(title="Local only")
+        original = server._install_staged_path
+
+        def fail_on_plans(source, target):
+            if target.name == "plans":
+                raise OSError("injected install failure")
+            return original(source, target)
+
+        with mock.patch.object(server, "_install_staged_path",
+                               side_effect=fail_on_plans):
+            resp = self.client.post(
+                "/api/backup/restore",
+                data={"backup_name": name, "strategy": "replace_all"},
+                content_type="multipart/form-data")
+        self.assertEqual(resp.status_code, 500)
+        self.assertTrue((server.LESSONS_DIR / "keeper").is_dir())
+        self.assertTrue((server.LESSONS_DIR / "local-only").is_dir())
+
+    def test_saf_bridge_streams_backup_paths_in_both_directions(self):
+        source = self.data / "source.zip"
+        source.write_bytes(b"streamed archive")
+
+        class FakeBridge:
+            written = None
+            read = None
+
+            @classmethod
+            def writeBackupFileToUri(cls, path, name):
+                cls.written = (path, name, Path(path).read_bytes())
+
+            @classmethod
+            def readBackupFileToPath(cls, name, path):
+                cls.read = (name, path)
+                Path(path).write_bytes(b"restored archive")
+
+        cfg = {"destination_type": "saf",
+               "destination_uri": "content://example/tree"}
+        name = "lesson-library-backup-20260102-060000.zip"
+        with mock.patch.object(server, "_saf_bridge",
+                               return_value=FakeBridge):
+            server.deliver_backup(cfg, source, name)
+            materialized = server.materialize_backup(cfg, name)
+        try:
+            self.assertEqual(FakeBridge.written,
+                             (str(source), name, b"streamed archive"))
+            self.assertEqual(FakeBridge.read, (name, str(materialized)))
+            self.assertEqual(materialized.read_bytes(), b"restored archive")
+        finally:
+            materialized.unlink(missing_ok=True)
 
 
 class TestHealthAndMaintenance(LibraryTestCase):

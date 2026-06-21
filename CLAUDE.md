@@ -44,7 +44,7 @@ reference: [README.md](README.md).
 
 ```powershell
 # from lesson-library/
-py tests\test_server.py                                          # 99 tests, must stay green
+py tests\test_server.py                                          # 108 tests, must stay green
 $env:LESSONLIB_DATA_DIR='C:\tmp\matlib'; py server.py            # run locally
 powershell -ExecutionPolicy Bypass -File .\android\build-apk.ps1 # build APK (offline kit)
 ```
@@ -59,7 +59,7 @@ demo data dir `%TEMP%\matlib-demo`. Verify UI at 412×920, light AND dark
   normalization in the middle, naming/IO helpers at the top).
 - All frontend behavior: `static/app.js` (hash router `route()`/`render()`,
   payload cached in `DB`, views are `render*` functions building innerHTML).
-  Bottom nav is **Library / Classes / Inbox**; maintenance (theme, rescan,
+  Bottom nav is **Library / Classes / Reflect / Inbox**; maintenance (theme, rescan,
   health, backup) lives in `renderSettings()` behind the app-bar gear.
 - All styling: `static/style.css` — tokens at the top (`:root` light,
   `[data-theme="dark"]` dark); components never use raw hex.
