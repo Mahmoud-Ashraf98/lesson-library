@@ -2179,6 +2179,10 @@ async function setPlanItemDone(p, i, done, mats) {
   it.done = done;
   try {
     await savePlan(p);
+    // A quick-jump side-track is temporary only until the first successful
+    // plan save. The server deliberately drops this UI-only marker, so keep
+    // the live run-mode object in sync immediately: it is now a normal item.
+    if (it.side_track) delete it.side_track;
   } catch (err) {
     toast("Could not save plan: " + err.message, "error");
     await refresh();

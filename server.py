@@ -31,13 +31,15 @@ import os
 import re
 import shutil
 import socket
+import stat
 import sys
 import threading
 import unicodedata
+import uuid
 import zipfile
 from collections import Counter
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from flask import Flask, Response, abort, jsonify, request, send_file
 
@@ -1722,8 +1724,13 @@ def too_large(_):
 # returns 503 and the rest of the app is untouched. backup.json (at the data
 # root) is the only new file. See CLAUDE.md for the scoped relaxation.
 BACKUP_SUBDIRS = ("lessons", "plans", "Inbox", "Trash")
-BACKUP_NAME_RE = re.compile(r"^lesson-library-backup-\d{8}-\d{6}\.zip$")
+BACKUP_NAME_RE = re.compile(
+    r"^lesson-library-backup-\d{8}-\d{6}(?:-\d{6})?\.zip$")
 RESTORE_STRATEGIES = ("replace_all", "merge_skip", "merge_overwrite")
+
+
+class UnsafeBackupError(ValueError):
+    """A selected archive is malformed or unsafe to restore."""
 
 
 def read_backup_config():
@@ -1813,13 +1820,22 @@ def deliver_backup(cfg, src_path, name):
     if cfg.get("destination_type") == "local":
         dest_dir = Path(cfg["destination_path"])
         dest_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(src_path), str(dest_dir / name))
+        dest = dest_dir / name
+        tmp = dest_dir / (name + ".tmp")
+        try:
+            shutil.copy2(str(src_path), str(tmp))
+            os.replace(tmp, dest)
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
     else:
         bridge = _saf_bridge()
         if bridge is None:
             raise RuntimeError("The backup folder isn't reachable on this "
                                "device.")
-        bridge.writeBackupToUri(src_path.read_bytes(), name)
+        bridge.writeBackupFileToUri(str(src_path), name)
 
 
 def list_backups(cfg=None):
@@ -1852,15 +1868,28 @@ def list_backups(cfg=None):
     return out
 
 
-def read_backup_bytes(cfg, name):
+def materialize_backup(cfg, name):
+    """Copy a selected backup to a private temporary path without loading the
+    archive into memory. The caller owns and must remove the returned path."""
     if not BACKUP_NAME_RE.match(name):  # also the traversal gate (no slashes)
         raise ValueError("Not a backup file name.")
-    if cfg.get("destination_type") == "local":
-        return (Path(cfg["destination_path"]) / name).read_bytes()
-    bridge = _saf_bridge()
-    if bridge is None:
-        raise RuntimeError("The backup folder isn't reachable on this device.")
-    return bytes(bridge.readBackupBytes(name))
+    tmp = DATA_DIR / (".restore-source-" + uuid.uuid4().hex + ".zip.tmp")
+    try:
+        if cfg.get("destination_type") == "local":
+            shutil.copyfile(Path(cfg["destination_path"]) / name, tmp)
+        else:
+            bridge = _saf_bridge()
+            if bridge is None:
+                raise RuntimeError(
+                    "The backup folder isn't reachable on this device.")
+            bridge.readBackupFileToPath(name, str(tmp))
+        return tmp
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def backup_is_due(cfg):
@@ -1889,8 +1918,10 @@ def perform_backup():
     cfg = read_backup_config()
     if not backup_configured(cfg):
         return None
-    name = "lesson-library-backup-" + datetime.now().strftime("%Y%m%d-%H%M%S") \
-           + ".zip"
+    # Microseconds make repeated manual/safety backups collision-resistant;
+    # BACKUP_NAME_RE still accepts the legacy second-resolution names.
+    name = "lesson-library-backup-" + \
+        datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".zip"
     tmp = DATA_DIR / (name + ".tmp")
     try:
         count = write_backup_zip(tmp)
@@ -1910,50 +1941,94 @@ def perform_backup():
             "timestamp": cfg["last_backup_at"], "name": name}
 
 
-def _dirs_in_zip(zf, sub):
-    out = set()
-    for n in zf.namelist():
-        parts = n.split("/")
-        if len(parts) >= 2 and parts[0] == sub and parts[1]:
-            out.add(parts[1])
-    return out
+def _validate_backup_component(part):
+    if (not part or part in (".", "..") or part[-1:] in (" ", ".")
+            or FORBIDDEN_FILENAME_CHARS.search(part)
+            or any(ord(ch) < 32 for ch in part)
+            or part.split(".", 1)[0].lower() in WINDOWS_RESERVED):
+        raise UnsafeBackupError("The backup contains an unsafe path.")
 
 
-def _extract_dir(zf, sub, did, base_dir):
-    """Replace base_dir/<did> with the backup's copy."""
-    target = base_dir / did
-    if target.exists():
-        shutil.rmtree(target)
-    prefix = sub + "/" + did + "/"
-    for n in zf.namelist():
-        if n.startswith(prefix) and not n.endswith("/"):
-            out = DATA_DIR / n
+def validate_backup_archive(zf):
+    """Return safe file members after validating the entire archive.
+
+    Validation is deliberately Windows/WebView conservative because archives
+    can be hand-copied into the configured destination. Nothing is extracted
+    until every member has passed these checks.
+    """
+    members = []
+    seen = set()
+    for info in zf.infolist():
+        name = info.filename
+        if (not name or "\x00" in name or "\\" in name
+                or name.startswith("/") or re.match(r"^[A-Za-z]:", name)):
+            raise UnsafeBackupError("The backup contains an unsafe path.")
+        is_dir = info.is_dir()
+        trimmed = name[:-1] if is_dir and name.endswith("/") else name
+        parts = trimmed.split("/")
+        if any(not part for part in parts):
+            raise UnsafeBackupError("The backup contains an unsafe path.")
+        for part in parts:
+            _validate_backup_component(part)
+        if parts[0] == "health.json":
+            if len(parts) != 1 or is_dir:
+                raise UnsafeBackupError("The backup has an invalid health file.")
+        elif parts[0] in BACKUP_SUBDIRS:
+            if not is_dir and len(parts) < 2:
+                raise UnsafeBackupError("The backup has a file outside a record.")
+            if parts[0] in ("lessons", "plans") and not is_dir \
+                    and len(parts) < 3:
+                raise UnsafeBackupError("The backup has an invalid record path.")
+        else:
+            raise UnsafeBackupError("The backup contains an unknown top-level path.")
+        mode = (info.external_attr >> 16) & 0xFFFF
+        if stat.S_ISLNK(mode):
+            raise UnsafeBackupError("The backup contains a symbolic link.")
+        if info.flag_bits & 0x1:
+            raise UnsafeBackupError("Encrypted backups are not supported.")
+        key = unicodedata.normalize("NFC", trimmed).casefold()
+        if key in seen:
+            raise UnsafeBackupError(
+                "The backup contains duplicate case-insensitive paths.")
+        seen.add(key)
+        if not is_dir and parts[0] in BACKUP_SUBDIRS:
+            members.append(info)
+    return members
+
+
+def _dirs_in_members(members, sub):
+    return {info.filename.split("/")[1] for info in members
+            if info.filename.startswith(sub + "/")
+            and len(info.filename.split("/")) >= 3}
+
+
+def stage_backup_archive(zf, members):
+    stage = DATA_DIR / (".restore-stage-" + uuid.uuid4().hex)
+    stage.mkdir(parents=True)
+    for sub in BACKUP_SUBDIRS:
+        (stage / sub).mkdir()
+    try:
+        for info in members:
+            parts = PurePosixPath(info.filename).parts
+            out = stage.joinpath(*parts)
             out.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(n) as src, open(out, "wb") as dst:
-                shutil.copyfileobj(src, dst)
+            with zf.open(info) as src, open(out, "xb") as dst:
+                shutil.copyfileobj(src, dst, length=256 * 1024)
+                dst.flush()
+                os.fsync(dst.fileno())
+        return stage
+    except Exception:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
 
 
-def merge_subdir(zf, sub, strategy):
-    base = DATA_DIR / sub
-    base.mkdir(parents=True, exist_ok=True)
-    added, skipped, overwritten = [], [], []
-    for did in sorted(_dirs_in_zip(zf, sub)):
-        exists = (base / did).is_dir()
-        if exists and strategy == "merge_skip":
-            skipped.append(did)
-            continue
-        _extract_dir(zf, sub, did, base)
-        (overwritten if exists else added).append(did)
-    return added, skipped, overwritten
-
-
-def detect_conflicts(zf):
+def detect_conflicts(zf, members):
     """Material ids whose lesson.json differs between the backup and the local
     copy — i.e. both devices edited the same material. Reported, never
     auto-resolved."""
     conflicts = []
-    names = set(zf.namelist())
-    for mid in sorted(_dirs_in_zip(zf, "lessons")):
+    names = {info.filename for info in members}
+    for mid in sorted(_dirs_in_members(members, "lessons")):
         local = LESSONS_DIR / mid / "lesson.json"
         member = "lessons/" + mid + "/lesson.json"
         if not local.is_file() or member not in names:
@@ -1966,46 +2041,145 @@ def detect_conflicts(zf):
     return conflicts
 
 
+def _remove_path(path):
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+
+
+def _new_restore_holder():
+    holder = DATA_DIR / ("Trash-restore-" +
+                         datetime.now().strftime("%Y%m%d-%H%M%S-%f"))
+    holder.mkdir(parents=True)
+    return holder
+
+
+def _install_staged_path(source, target):
+    """Small seam for fault-injection tests around the transactional move."""
+    shutil.move(str(source), str(target))
+
+
+def commit_merge_restore(stage, members, strategy):
+    added = {"lessons": [], "plans": []}
+    skipped = {"lessons": [], "plans": []}
+    overwritten = {"lessons": [], "plans": []}
+    installed = []
+    holder = None
+    try:
+        for sub in ("lessons", "plans"):
+            base = DATA_DIR / sub
+            base.mkdir(parents=True, exist_ok=True)
+            for did in sorted(_dirs_in_members(members, sub)):
+                source = stage / sub / did
+                target = base / did
+                exists = target.exists()
+                if exists and strategy == "merge_skip":
+                    skipped[sub].append(did)
+                    continue
+                old = None
+                if exists:
+                    if holder is None:
+                        holder = _new_restore_holder()
+                    old = holder / sub / did
+                    old.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(target), str(old))
+                try:
+                    _install_staged_path(source, target)
+                except Exception:
+                    if old is not None and old.exists():
+                        shutil.move(str(old), str(target))
+                    raise
+                installed.append((target, old))
+                (overwritten if exists else added)[sub].append(did)
+    except Exception:
+        for target, old in reversed(installed):
+            _remove_path(target)
+            if old is not None and old.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(old), str(target))
+        if holder is not None:
+            shutil.rmtree(holder, ignore_errors=True)
+        raise
+    return {
+        "strategy": strategy,
+        "added": added["lessons"], "skipped": skipped["lessons"],
+        "overwritten": overwritten["lessons"],
+        "plans_added": added["plans"],
+        "plans_skipped": skipped["plans"],
+        "plans_overwritten": overwritten["plans"],
+        **({"moved_aside": holder.name} if holder is not None else {}),
+    }
+
+
+def commit_replace_all_restore(stage, members):
+    holder = _new_restore_holder()
+    originals = []
+    installed = []
+    try:
+        for sub in BACKUP_SUBDIRS:
+            live = DATA_DIR / sub
+            old = holder / sub
+            if live.exists():
+                shutil.move(str(live), str(old))
+                originals.append((live, old))
+        for sub in BACKUP_SUBDIRS:
+            source = stage / sub
+            live = DATA_DIR / sub
+            _install_staged_path(source, live)
+            installed.append(live)
+    except Exception:
+        for live in reversed(installed):
+            _remove_path(live)
+        for live, old in reversed(originals):
+            if old.exists():
+                live.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(old), str(live))
+        shutil.rmtree(holder, ignore_errors=True)
+        raise
+    return {"strategy": "replace_all",
+            "restored": sorted(_dirs_in_members(members, "lessons")),
+            "moved_aside": holder.name}
+
+
 def perform_restore(backup_name, strategy):
     cfg = read_backup_config()
     if not backup_configured(cfg):
         return None
     if strategy not in RESTORE_STRATEGIES:
         raise ValueError("Unknown restore strategy.")
-    data = read_backup_bytes(cfg, backup_name)
-    zf = zipfile.ZipFile(io.BytesIO(data))
-    conflicts = detect_conflicts(zf)        # before we touch the current state
-    safety = None                           # pre-restore safety backup
+    archive = materialize_backup(cfg, backup_name)
+    stage = None
     try:
-        res = perform_backup()
-        safety = res["name"] if res else None
-    except Exception:
-        safety = None
-    if strategy == "replace_all":
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        holder = DATA_DIR / ("Trash-restore-" + stamp)
-        holder.mkdir(parents=True, exist_ok=True)
-        for sub in BACKUP_SUBDIRS:
-            base = DATA_DIR / sub
-            if base.exists():
-                shutil.move(str(base), str(holder / sub))
-        ensure_dirs()
-        members = [n for n in zf.namelist()
-                   if n.split("/")[0] in BACKUP_SUBDIRS and not n.endswith("/")]
-        zf.extractall(DATA_DIR, members=members)
-        result = {"strategy": strategy,
-                  "restored": sorted(_dirs_in_zip(zf, "lessons")),
-                  "moved_aside": holder.name}
-    else:
-        la, ls, lo = merge_subdir(zf, "lessons", strategy)
-        pa, ps, po = merge_subdir(zf, "plans", strategy)
-        result = {"strategy": strategy, "added": la, "skipped": ls,
-                  "overwritten": lo, "plans_added": pa, "plans_skipped": ps,
-                  "plans_overwritten": po}
-    result["conflicts"] = conflicts
-    result["safety_backup"] = safety
-    rebuild_index()
-    return result
+        try:
+            with zipfile.ZipFile(archive) as zf:
+                members = validate_backup_archive(zf)
+                stage = stage_backup_archive(zf, members)
+                conflicts = detect_conflicts(zf, members)
+        except (zipfile.BadZipFile, zipfile.LargeZipFile, EOFError) as e:
+            raise UnsafeBackupError(
+                "The selected file is not a valid backup archive.") from e
+
+        # The UI promises a safety backup. If it cannot be delivered, abort
+        # before the first live directory is moved or replaced.
+        safety_result = perform_backup()
+        if not safety_result:
+            raise RuntimeError("Could not create the pre-restore safety backup.")
+        if strategy == "replace_all":
+            result = commit_replace_all_restore(stage, members)
+        else:
+            result = commit_merge_restore(stage, members, strategy)
+        result["conflicts"] = conflicts
+        result["safety_backup"] = safety_result["name"]
+        rebuild_index()
+        return result
+    finally:
+        if stage is not None:
+            shutil.rmtree(stage, ignore_errors=True)
+        try:
+            archive.unlink()
+        except OSError:
+            pass
 
 
 @app.post("/api/backup/now")
@@ -2051,6 +2225,9 @@ def api_backup_restore():
         return jsonify(error="Unknown restore strategy."), 400
     try:
         result = perform_restore(name, strategy)
+    except UnsafeBackupError as e:
+        log(f"restore rejected: {e}")
+        return jsonify(error=f"Restore rejected: {e}"), 400
     except Exception as e:
         log(f"restore failed: {e}")
         return jsonify(error=f"Restore failed: {e}"), 500

@@ -2184,6 +2184,24 @@ html, body { overscroll-behavior-y: contain; }
 .bkdot.due { background: var(--warn-ink); }
 .bkrow { display: flex; gap: 8px; margin: 4px 0 12px; }
 .bkrow .btn { flex: 1; }
+#backupcard .field { display: block; margin-top: 14px; }
+#backupcard .field > span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--ink-2);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+#backupcard select {
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+}
 
 .stratlist { display: flex; flex-direction: column; gap: 8px; }
 .stratopt {

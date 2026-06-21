@@ -1,7 +1,7 @@
 # Contributing
 
 Thanks for your interest! This is a small, deliberately constrained project —
-an **offline-only** material manager that runs on one teacher's phone. Those
+an **offline-first** material manager that runs on one teacher's phone. Those
 constraints are the point, so a contribution that respects them is far more
 likely to merge than a big one that doesn't.
 
@@ -38,7 +38,8 @@ On Windows (PowerShell): `$env:LESSONLIB_DATA_DIR='C:\tmp\matlib'; py server.py`
 
 2. **Honor the invariants** (CLAUDE.md §Invariants). The big ones:
    - Flask stays the only Python dependency; no external resources (no CDNs,
-     fonts, icon packs, or network calls), ever.
+     fonts, or icon packs). Network access is restricted to the explicitly
+     configured backup destination described in `CLAUDE.md`.
    - Never rename the data folders or `/api/lessons` routes — existing phones
      depend on them.
    - Every JSON write goes through `write_sidecar_json`; delete means move to

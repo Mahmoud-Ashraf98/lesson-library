@@ -1,3 +1,8 @@
+param(
+    [ValidateSet("Release", "Debug")]
+    [string]$BuildType = "Release"
+)
+
 $ErrorActionPreference = "Stop"
 
 $AndroidDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -87,7 +92,7 @@ if ($BuildPython) {
     Write-Host "No explicit Python 3.11 found; relying on Gradle auto-detection."
 }
 
-$GradleArgs = @("assembleDebug")
+$GradleArgs = @("assemble$BuildType")
 if ($BuildPython) {
     $GradleArgs += "-PchaquopyPython=$BuildPython"
 }
@@ -108,7 +113,8 @@ try {
     Pop-Location
 }
 
-$Apk = Join-Path $AndroidDir "app\build\outputs\apk\debug\app-debug.apk"
+$Variant = $BuildType.ToLowerInvariant()
+$Apk = Join-Path $AndroidDir "app\build\outputs\apk\$Variant\app-$Variant.apk"
 $FriendlyApk = Join-Path $ProjectDir "LessonLibrary.apk"
 Copy-Item $Apk $FriendlyApk -Force
 Write-Host ""

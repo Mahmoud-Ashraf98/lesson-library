@@ -2,11 +2,12 @@
 
 [![tests](../../actions/workflows/tests.yml/badge.svg)](../../actions/workflows/tests.yml)
 
-A personal, **fully offline** material manager for an EFL teacher. One Flask
+A personal, **offline-first** material manager for an EFL teacher. One Flask
 server + one vanilla-JS page, running on the teacher's own phone (Samsung S10
 Lite, Android 13) inside Termux or as a standalone APK at
-`http://127.0.0.1:8077`. There is no cloud, no account, no database, and no
-external resource of any kind.
+`http://127.0.0.1:8077`. There is no account or database and no external UI
+resource. The only opt-in cloud path is Backup & restore through Android's
+Storage Access Framework; until configured, the app remains entirely local.
 
 > **For AI agents:** read [CLAUDE.md](CLAUDE.md) first. It lists the
 > invariants you must not break and the commands to verify your work. This
@@ -40,8 +41,9 @@ repo). Everything below is the full reference.
    `/storage/emulated/0/LessonLibrary/` (not private app storage) so Samsung
    Files, Google Drive backup, and USB transfer all see it. This is why the
    APK needs "All files access".
-3. **Offline is a feature.** No CDN fonts, no icon packs, no analytics, no
-   network calls of any kind. System fonts + inline SVG only.
+3. **Offline is a feature.** No CDN fonts, icon packs, analytics, or general
+   network calls. System fonts + inline SVG only. The sole scoped exception is
+   an explicitly configured Backup & restore destination.
 4. **Nothing is ever silently destroyed.** Delete = move to
    `LessonLibrary/Trash/`. The single permanent-delete operation
    (`POST /api/trash/empty`) exists only behind an explicit confirmation on
@@ -65,7 +67,7 @@ lesson-library/
 │   ├── style.css           # Design system: all tokens + components
 │   └── taxonomy.json       # Curated option catalogs (grammar, topics, …)
 ├── tests/
-│   └── test_server.py      # 99 unittest tests (Flask test client, no deps)
+│   └── test_server.py      # 108 unittest tests (Flask test client, no deps)
 ├── android/                # APK wrapper (Chaquopy embeds Python + WebView)
 │   ├── build-apk.ps1       # One-command build (copies server+static in)
 │   ├── README.md           # Wrapper details
@@ -478,7 +480,7 @@ at `http://127.0.0.1:8077/`.
 | Share **out** | `window.MLBridge.shareFile(id, name)` / `shareFiles(id, namesJson)` (`@JavascriptInterface`) → `ACTION_SEND` / `ACTION_SEND_MULTIPLE` chooser with `content://com.lessonlibrary.app.files/<id>/<name>` URIs |
 | `KitFileProvider` | Hand-rolled read-only `ContentProvider` (path-traversal-checked, answers `DISPLAY_NAME`/`SIZE` queries, guesses MIME). Exists **instead of androidx FileProvider** because the build kit is offline and must not need new dependencies |
 | File picker | `onShowFileChooser` → `ACTION_OPEN_DOCUMENT` (multiple) |
-| Backup folder (Feature E) | `window.MLBridge.pickBackupFolder()` → `ACTION_OPEN_DOCUMENT_TREE`; the granted tree URI is persisted (`takePersistableUriPermission`, stored by `BackupBridge`) and handed back to JS via `onBackupFolderPicked(uri)`. The Python server calls `BackupBridge.{writeBackupToUri, readBackupNames, readBackupBytes}` (Chaquopy → Java) using framework `DocumentsContract` — **no new dependency** |
+| Backup folder (Feature E) | `window.MLBridge.pickBackupFolder()` → `ACTION_OPEN_DOCUMENT_TREE`; the granted tree URI is persisted (`takePersistableUriPermission`, stored by `BackupBridge`) and handed back to JS via `onBackupFolderPicked(uri)`. The Python server calls `BackupBridge.{writeBackupFileToUri, readBackupNames, readBackupFileToPath}` (Chaquopy → Java) using framework `DocumentsContract` and streams via temporary files — **no new dependency** |
 | Back button | WebView history back (pairs with hash routing) |
 
 Build: `powershell -ExecutionPolicy Bypass -File .\android\build-apk.ps1`
@@ -486,7 +488,9 @@ from the project root. The script copies the **current** `server.py` +
 `static/` into `android/app/src/main/python/` (those copies are generated
 artifacts — never edit them), then runs the portable Gradle/JDK/SDK kit in
 `.android-tools/` fully offline, signs, and drops `LessonLibrary.apk` in the
-project root. Signing secrets come from `android/keystore.properties`
+project root. The default is a non-debuggable release build; pass
+`-BuildType Debug` only for local diagnostics. Signing secrets come from
+`android/keystore.properties`
 (gitignored — copy `keystore.properties.example` and fill it in). Without that
 file the script auto-generates a throwaway keystore so a fresh clone still
 builds; the resulting APK simply won't install as an update over the original
@@ -505,10 +509,11 @@ path, never an HTTP client library.
   *Termux/desktop:* a local filesystem path the teacher keeps synced to Drive
   with their own tool (rclone, Insync…). Configured in Settings → **Backup &
   restore**, persisted in `backup.json` (§3.6).
-- **Backup format.** One `lesson-library-backup-YYYYMMDD-HHMMSS.zip` of the
+- **Backup format.** One `lesson-library-backup-YYYYMMDD-HHMMSS-ffffff.zip` of the
   whole tree (`lessons/`, `plans/`, `Inbox/`, `Trash/`) with folder names —
   i.e. record ids — preserved exactly, plus a `health.json` snapshot at the
-  root. Built to a temp file so memory stays flat.
+  root. Legacy second-resolution names remain readable. Archives stream through
+  temporary files so memory stays flat.
 - **Smart nudges.** A reminder cadence (3/7/14/30 days or never) and an
   optional "back up after N new materials" trigger drive a non-blocking,
   dismissable banner on the library home and an `is_due` flag in
@@ -518,7 +523,8 @@ path, never an HTTP client library.
   **merge, keep mine** (`merge_skip`, the safe default), **merge, use backup**
   (`merge_overwrite`), or **replace everything** (`replace_all`, which moves
   the current tree to `Trash-restore-<timestamp>/` first). Every restore
-  auto-creates a safety backup of the current state first, and reports any
+  validates and stages the whole archive, requires a safety backup of the
+  current state, rolls back failed replacements, and reports any
   **conflicts** (material ids whose `lesson.json` differs between devices) for
   the teacher to reconcile by hand — never auto-resolved.
 
@@ -528,7 +534,7 @@ path, never an HTTP client library.
 
 | Task | Command |
 |---|---|
-| Run tests (99) | `py tests\test_server.py` (from `lesson-library/`) |
+| Run tests (108) | `py tests\test_server.py` (from `lesson-library/`) |
 | Run locally (Windows) | `$env:LESSONLIB_DATA_DIR='C:\some\tmp\dir'; py server.py` → http://127.0.0.1:8077 |
 | Desktop preview (agents) | `preview_start` with launch config `material-library` (data dir `%TEMP%\matlib-demo`) |
 | Run on phone (Termux) | `./start.sh` (also installs a Termux:Widget shortcut) |

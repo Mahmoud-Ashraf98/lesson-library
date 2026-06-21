@@ -11,6 +11,7 @@ Chaquopy (Python 3.11 in-process). It starts the server only on
 | File | Role |
 |---|---|
 | `app/src/main/java/.../MainActivity.java` | WebView host. Permission flow, server boot + readiness poll, file picker, opens `/files/*` + `/inbox-files/*` + `/api/export.csv` + non-local URLs externally, receives `ACTION_SEND`/`SEND_MULTIPLE` shares into `LessonLibrary/Inbox` (writing a `.last-share.json` batch marker), exposes `window.MLBridge.shareFile(id, name)` **and** `shareFiles(id, namesJson)` (SEND_MULTIPLE) to the page |
+| `app/src/main/java/.../BackupBridge.java` | Streams backup ZIPs between Python temporary files and a persisted Storage Access Framework folder without loading the whole archive into memory |
 | `app/src/main/java/.../KitFileProvider.java` | Hand-rolled read-only `ContentProvider` over `LessonLibrary/lessons/` so files can be shared out via `ACTION_SEND`/`ACTION_SEND_MULTIPLE` content URIs. Deliberately replaces androidx FileProvider — the build kit is offline and must not pull new dependencies |
 | `app/src/main/python/android_entry.py` | Entry point: sets `LESSONLIB_DATA_DIR`, boots the Flask server |
 | `app/src/main/python/server.py`, `static/` | **Generated at build time** by `build-apk.ps1` from the project root — never edit these copies |
@@ -46,11 +47,14 @@ The script:
    (rebuild after **any** app change, or the APK ships stale code),
 2. locates a **Python 3.11** interpreter for Chaquopy and passes its path via
    `-PchaquopyPython=…` (see below),
-3. builds `assembleDebug` with the portable, fully offline kit in
+3. builds `assembleRelease` by default with the portable, fully offline kit in
    `../.android-tools/` (JDK, Gradle 9.4.1, Android SDK; selected via
    `JAVA_HOME`/`ANDROID_HOME`/`GRADLE_USER_HOME` env vars),
 4. signs with `lesson-library.keystore` (debug and release both use it),
 5. copies the result to `LessonLibrary.apk` in the project root.
+
+For a local diagnostic build, add `-BuildType Debug`. GitHub releases must use
+the default release configuration.
 
 **Host Python 3.11 is a build-time requirement.** Chaquopy runs a real
 Python 3.11 on the build machine to assemble the pip requirements (Flask).
