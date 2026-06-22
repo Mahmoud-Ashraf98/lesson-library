@@ -364,6 +364,36 @@ class TestUploadsAndSafety(LibraryTestCase):
         self.assertFalse((server.LESSONS_DIR / rec["id"]).exists())
         self.assertTrue((server.TRASH_DIR / rec["id"]).exists())
 
+    def test_restore_returns_material_from_trash(self):
+        rec = self.create_material().get_json()["lesson"]
+        trashed = self.client.post(
+            "/api/lessons/" + rec["id"] + "/trash").get_json()["trashed"]
+        resp = self.client.post("/api/trash/restore",
+                                data={"name": trashed, "id": rec["id"]})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["restored"], rec["id"])
+        self.assertTrue((server.LESSONS_DIR / rec["id"]).exists())
+        self.assertFalse((server.TRASH_DIR / trashed).exists())
+        ids = [r["id"] for r in server.index_payload()["lessons"]]
+        self.assertIn(rec["id"], ids)
+
+    def test_restore_missing_item_404s(self):
+        resp = self.client.post("/api/trash/restore",
+                                data={"name": "nope", "id": "nope"})
+        self.assertEqual(resp.status_code, 404)
+
+    def test_restore_dedupes_when_name_taken(self):
+        rec = self.create_material(title="Dup").get_json()["lesson"]
+        trashed = self.client.post(
+            "/api/lessons/" + rec["id"] + "/trash").get_json()["trashed"]
+        # something else takes the original slug before the undo lands
+        self.create_material(title="Dup")
+        resp = self.client.post("/api/trash/restore",
+                                data={"name": trashed, "id": rec["id"]})
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotEqual(resp.get_json()["restored"], rec["id"])
+        self.assertFalse((server.TRASH_DIR / trashed).exists())
+
 
 class TestTaxonomyCatalog(LibraryTestCase):
     def test_taxonomy_loaded_and_valid(self):

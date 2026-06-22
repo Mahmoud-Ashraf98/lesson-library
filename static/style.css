@@ -613,6 +613,64 @@ body[data-view="list"] .fab, body[data-view="plans"] .fab { display: inline-flex
 .results.grid .card-chev { display: none; }
 .results.grid .emptystate { grid-column: 1 / -1; }
 
+/* ---- bulk select mode ---- */
+#selectbtn.on { color: var(--primary-soft-ink); background: var(--primary-soft); }
+.cardcheck { display: none; }
+.results.selectmode .card { position: relative; }
+.results.selectmode .card-chev { display: none; }
+.results.selectmode .cardcheck {
+  display: grid;
+  place-items: center;
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  color: var(--ink-3);
+  z-index: 2;
+}
+.results.selectmode .cardcheck svg { width: 16px; height: 16px; }
+.results.selectmode .card.selected {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary-soft);
+}
+.results.selectmode .card.selected .cardcheck {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--on-primary);
+}
+.selbar {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: calc(78px + env(safe-area-inset-bottom));
+  z-index: 61;
+  max-width: 420px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--nav-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-2);
+}
+.selbarcount {
+  flex: 1;
+  min-width: 0;
+  padding-left: 4px;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--ink-2);
+}
+.selbar .btn { min-height: 44px; padding: 0 12px; }
+.selbar .btn svg { width: 16px; height: 16px; }
+body.selecting .fab { display: none !important; }
+
 /* badges */
 .badges { display: flex; flex-wrap: wrap; gap: 5px; }
 .badge {
@@ -1426,6 +1484,18 @@ form textarea { min-height: 90px; resize: vertical; line-height: 1.5; }
 .banner svg { width: 20px; height: 20px; flex: none; }
 .bannertext { flex: 1; font-size: 14.5px; }
 .banner strong { font-weight: 700; }
+/* tidy-later nudge: a banner whose text is itself the tap target */
+.tidymain {
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  font-size: 14.5px;
+  cursor: pointer;
+}
+.banner.tidy .textbtn { flex: none; }
 
 .sortwrap { display: flex; align-items: center; gap: 4px; }
 .iconbtn.small { width: 38px; height: 38px; }
