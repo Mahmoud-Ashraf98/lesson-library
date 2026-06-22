@@ -11,10 +11,10 @@
         android:name="com.chaquo.python.android.PyApplication"
         android:allowBackup="true"
         android:enableOnBackInvokedCallback="false"
-        android:icon="@drawable/ic_lesson_library"
+        android:icon="@mipmap/ic_launcher"
         android:label="Material Library"
         android:requestLegacyExternalStorage="true"
-        android:roundIcon="@drawable/ic_lesson_library"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:usesCleartextTraffic="true">

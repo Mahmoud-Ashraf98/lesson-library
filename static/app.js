@@ -68,6 +68,7 @@ function esc(s) {
 /* ---- inline SVG icon set (Lucide-style, stroke-based, no emoji) ---- */
 const ICONS = {
   search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  eye: '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
@@ -229,6 +230,23 @@ function cardThumbHTML(m) {
     return `<img class="cthumb" loading="lazy" alt="" src="${fileURL(m.id, img)}">`;
   }
   return `<span class="cthumb cthumb-ph" aria-hidden="true">${icon(materialIcon(m))}</span>`;
+}
+
+/* ---- detail hero collage: up to 6 of the material's own images tiled to the
+   left of the title (decorative — the same files are listed below), or a
+   gradient placeholder tile carrying the format icon when there are none ---- */
+function heroCollageHTML(m) {
+  let imgs = (m.files || []).filter(f => IMAGE_RE.test(f.name));
+  imgs = imgs.slice(0, imgs.length === 5 ? 4 : 6);  // avoid a lone empty grid cell
+  if (!imgs.length) {
+    return `<span class="herocollage herocollage-ph" aria-hidden="true">${icon(materialIcon(m))}</span>`;
+  }
+  if (imgs.length === 1) {
+    return `<span class="herocollage single">
+      <img loading="lazy" alt="" src="${fileURL(m.id, imgs[0].name)}"></span>`;
+  }
+  return `<span class="herocollage tiles n${imgs.length}" aria-hidden="true">${
+    imgs.map(f => `<img loading="lazy" alt="" src="${fileURL(m.id, f.name)}">`).join("")}</span>`;
 }
 
 function heroThumbHTML(m) {
@@ -1777,9 +1795,27 @@ function materialNeedsRevision(m) {
   return (m.usage || []).some(u => u.needs_revision);
 }
 
+// Jump from a detail-view facet pill to the Library filtered by that one value
+// — clears any current search/filters so the result is "everything tagged X".
+function filterByFacet(key, val) {
+  if (!filters[key]) return;
+  filters.q = "";
+  showUntagged = false;
+  [...COMPACT_FACETS, ...MORE_FACETS].forEach(([k]) => filters[k].clear());
+  filters[key].add(val);
+  filtersOpen = true;
+  if (MORE_FACETS.some(([k]) => k === key)) moreOpen = true;  // reveal its picker
+  location.hash = "#/";
+}
+
 function cardHTML(m, i) {
-  const skills = (m.skills || []).map(s =>
-    `<span class="badge">${esc(s)}</span>`).join("");
+  // note 4: level + exam + age + skills share one wrapping badge row so cards
+  // of different tag counts still line up against the fixed 84px thumbnail.
+  const badgeBits = [];
+  for (const lv of m.cefr_levels || []) badgeBits.push(`<span class="badge ${cefrClass(lv)}">${esc(lv)}</span>`);
+  for (const ex of m.exam_targets || []) badgeBits.push(`<span class="badge exam">${esc(ex)}</span>`);
+  for (const ag of m.age_groups || []) badgeBits.push(`<span class="badge">${esc(ag)}</span>`);
+  for (const sk of m.skills || []) badgeBits.push(`<span class="badge">${esc(sk)}</span>`);
   const needsRev = materialNeedsRevision(m);
   const foot = [];
   if (m.duration_min) foot.push(`<span>${icon("clock")}${m.duration_min} min</span>`);
@@ -1805,8 +1841,7 @@ function cardHTML(m, i) {
     ${cardThumbHTML(m)}
     <div class="card-body">
       <div class="card-title">${highlight(m.title, filters.q)}</div>
-      ${badgesHTML(m)}
-      ${skills ? `<div class="badges">${skills}</div>` : ""}
+      ${badgeBits.length ? `<div class="badges">${badgeBits.join("")}</div>` : ""}
       ${needsRev ? `<div class="badges"><span class="revbadge">${icon("alert")}Needs revision</span></div>` : ""}
       ${foot.length ? `<div class="card-foot">${foot.join("")}</div>` : ""}
     </div>
@@ -1863,13 +1898,13 @@ function renderDetail(id) {
   }
 
   const facetItems = [
-    ["Skills", m.skills],
-    ["Format", m.formats],
-    ["Grammar", m.grammar_points],
-    ["Vocabulary", m.vocab_focuses],
-    ["Topics", m.topics],
-    ["Themes", m.themes],
-  ].filter(([, arr]) => arr && arr.length);
+    ["Skills", "skills", m.skills],
+    ["Format", "formats", m.formats],
+    ["Grammar", "grammar_points", m.grammar_points],
+    ["Vocabulary", "vocab_focuses", m.vocab_focuses],
+    ["Topics", "topics", m.topics],
+    ["Themes", "themes", m.themes],
+  ].filter(([, , arr]) => arr && arr.length);
 
   const usage = m.usage || [];
   const totalBytes = (m.files || []).reduce((t, f) => t + (f.size || 0), 0);
@@ -1880,6 +1915,9 @@ function renderDetail(id) {
   if (m.date_added) metaline.push(`<span>${icon("calendar")}Added ${esc(fmtDate(m.date_added))}</span>`);
   if (usage.length) {
     metaline.push(`<span>${icon("history")}Used ${usage.length}× · ${esc(relDate(lastUsed(m)))}</span>`);
+  }
+  if ((m.topics || []).length) {
+    metaline.push(`<span class="metatag">${icon("tags")}${esc(m.topics[0])}</span>`);
   }
 
   // file-type chips: only the kinds actually present in this folder
@@ -1897,24 +1935,32 @@ function renderDetail(id) {
     <a class="back" href="#/" id="backlink">${icon("back")}Back</a>
     <div class="detail">
       <div class="herocard">
-        ${heroThumbHTML(m)}
-        <h2>${esc(m.title)}</h2>
-        ${badgesHTML(m)}
+        <div class="herotop">
+          ${heroCollageHTML(m)}
+          <div class="heromain">
+            <h2>${esc(m.title)}</h2>
+            ${badgesHTML(m)}
+          </div>
+        </div>
         <div class="metaline">${metaline.join("")}</div>
-        ${m.files.length ? `<button id="herosharebtn" class="btn heroshare" type="button">
-          ${icon("share")}<span>${m.files.length === 1
-            ? "Share file" : "Share files…"}</span></button>` : ""}
+        <div class="quickactions">
+          <button id="previewbtn" class="qtile" type="button" ${m.files.length ? "" : "disabled"}>
+            ${icon("eye")}<span>Preview</span></button>
+          <button id="herosharebtn" class="qtile" type="button" ${m.files.length ? "" : "disabled"}>
+            ${icon("share")}<span>Share</span></button>
+          <button id="logusebtn" class="qtile" type="button">${icon("history")}<span>Log use</span></button>
+          <button id="toplanbtn" class="qtile" type="button">${icon("calplus")}<span>Add to plan</span></button>
+        </div>
       </div>
       ${m.notes ? `<div class="notecallout"><span class="notelabel">Notes</span>${esc(m.notes)}</div>` : ""}
-      <div class="quickactions">
-        <button id="logusebtn" class="btn soft" type="button">${icon("history")}<span>Log use</span></button>
-        <button id="toplanbtn" class="btn soft" type="button">${icon("calplus")}<span>Add to plan</span></button>
-      </div>
-      ${facetItems.length ? `<div class="facetgrid">
-        ${facetItems.map(([label, arr]) => `
-          <div class="facetitem">
-            <div class="flabel">${label}</div>
-            <div class="badges">${arr.map(v => `<span class="tag">${esc(v)}</span>`).join("")}</div>
+      ${facetItems.length ? `<div class="facetlist">
+        ${facetItems.map(([label, key, arr]) => `
+          <div class="facetlistrow">
+            <span class="frlabel">${label}</span>
+            <div class="frvals">${arr.map(v =>
+              `<button type="button" class="frpill" data-facet="${esc(key)}"
+                       data-v="${esc(v)}">${esc(v)}</button>`).join("")}</div>
+            ${icon("chevron", "frchev")}
           </div>`).join("")}
       </div>` : ""}
       <h3 class="section-title">${icon("folder")}Files (${m.files.length})</h3>
@@ -2149,6 +2195,15 @@ function renderDetail(id) {
   if (heroShare) {
     heroShare.addEventListener("click", () => openShareSheet(m));
   }
+  const previewBtn = $("#previewbtn");
+  if (previewBtn) {
+    previewBtn.addEventListener("click", () => {
+      const imgName = firstImageName(m);
+      if (imgName) { openLightbox(m.id, imgName); return; }
+      const f = (m.files || [])[0];
+      if (f) window.open(fileURL(m.id, f.name), "_blank", "noopener");
+    });
+  }
 
   $("#backlink").addEventListener("click", e => {
     e.preventDefault();
@@ -2156,6 +2211,8 @@ function renderDetail(id) {
   });
 
   $(".detail").addEventListener("click", async e => {
+    const fpill = e.target.closest(".frpill");
+    if (fpill) { filterByFacet(fpill.dataset.facet, fpill.dataset.v); return; }
     const img = e.target.closest("[data-img]");
     if (img) { openLightbox(m.id, img.dataset.img); return; }
     const share = e.target.closest("[data-share]");
