@@ -172,11 +172,13 @@ body[data-view="list"] main, body[data-view="plans"] main {
   height: 40px;
   flex: none;
   border-radius: 13px;
+  overflow: hidden;
   background: linear-gradient(135deg, var(--grad-1), var(--grad-2));
   color: var(--on-primary);
   box-shadow: var(--glow);
 }
 .brandmark svg { width: 21px; height: 21px; }
+.brandmark img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .brandcol { display: flex; flex-direction: column; min-width: 0; }
 .appbar h1 {
   margin: 0;
@@ -800,9 +802,44 @@ body.selecting .fab { display: none !important; }
   background: var(--surface);
   box-shadow: var(--shadow-1);
 }
-.herocard h2 { margin: 12px 0 0; }
-.herocard .badges { margin-top: 10px; }
-.herocard .metaline { margin-top: 10px; }
+/* note 1: collage sits left of the title/badges so they read as one block */
+.herotop { display: flex; gap: 16px; align-items: flex-start; }
+.heromain { flex: 1; min-width: 0; }
+.herocard h2 {
+  margin: 2px 0 0;
+  font-size: clamp(20px, 5.6vw, 25px);
+  line-height: 1.15;
+}
+.heromain .badges { margin-top: 12px; }
+.herocard .metaline { margin-top: 16px; }
+.metatag { color: var(--primary); font-weight: 600; }
+.metatag svg { color: var(--primary) !important; }
+
+/* hero image collage — up to 6 of the material's own images */
+.herocollage {
+  flex: none;
+  width: 150px;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.herocollage.single { display: block; height: 112px; }
+.herocollage img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.herocollage.tiles { display: grid; gap: 2px; grid-auto-rows: 55px; }
+.herocollage.n2 { grid-template-columns: 1fr 1fr; }
+.herocollage.n3 { grid-template-columns: 1fr 1fr 1fr; }
+.herocollage.n4 { grid-template-columns: 1fr 1fr; }
+.herocollage.n6 { grid-template-columns: 1fr 1fr 1fr; }
+.herocollage.herocollage-ph {
+  display: grid;
+  place-items: center;
+  height: 112px;
+  background: linear-gradient(135deg, var(--thumb-grad-1), var(--thumb-grad-2));
+  color: var(--primary);
+}
+.herocollage.herocollage-ph svg { width: 40px; height: 40px; }
+
 .herothumb {
   display: block;
   width: 100%;
@@ -813,12 +850,36 @@ body.selecting .fab { display: none !important; }
   border: 1px solid var(--border);
 }
 .herothumb.cthumb-ph svg { width: 46px; height: 46px; }
-.btn.heroshare {
-  margin-top: 14px;
-  background: transparent;
-  color: var(--primary);
-  border-color: var(--border-strong);
+
+/* note 2: Preview / Share / Log use / Add to plan as equal bordered tiles */
+.quickactions {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 9px;
+  margin-top: 16px;
 }
+.qtile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 64px;
+  padding: 13px 4px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.15;
+  text-align: center;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease), transform var(--t-fast) var(--ease);
+}
+.qtile svg { width: 22px; height: 22px; color: var(--primary); }
+.qtile:active { background: var(--surface-2); transform: scale(.96); }
+.qtile:disabled { opacity: .4; cursor: default; }
 
 .notecallout {
   margin-top: 16px;
@@ -842,26 +903,48 @@ body.selecting .fab { display: none !important; }
   letter-spacing: .07em;
 }
 
-.facetgrid { margin-top: 16px; display: grid; gap: 12px; }
-.facetitem .flabel {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--ink-3);
-  text-transform: uppercase;
-  letter-spacing: .07em;
-  margin-bottom: 5px;
+/* note 3: facets as a full-width settings list — label, value pill(s),
+   chevron — mirroring the library filter rows. Tapping a value jumps to the
+   library filtered by it. */
+.facetlist {
+  margin-top: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+  overflow: hidden;
 }
-.tag {
+.facetlistrow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.facetlistrow:last-child { border-bottom: 0; }
+.frlabel {
+  flex: 0 0 78px;
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+.frvals { flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 7px; }
+.frpill {
   display: inline-flex;
   align-items: center;
-  padding: 5px 13px;
+  min-height: 34px;
+  padding: 6px 14px;
   border-radius: var(--radius-pill);
-  background: var(--surface);
   border: 1px solid var(--border);
+  background: var(--surface);
   color: var(--ink);
-  font-size: 13.5px;
+  font-size: 14px;
   font-weight: 550;
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease);
 }
+.frpill:active { background: var(--surface-2); }
+.frchev { flex: none; width: 18px; height: 18px; color: var(--ink-3); }
 
 .section-title {
   display: flex;
@@ -1597,9 +1680,7 @@ form textarea { min-height: 90px; resize: vertical; line-height: 1.5; }
 .formcard .btn.wide { margin-top: 12px; }
 .formcard .filelist { box-shadow: none; margin-top: 8px; }
 
-/* ================= detail quick actions ================= */
-.quickactions { display: flex; gap: 10px; margin-top: 14px; }
-.quickactions .btn { flex: 1; }
+/* ================= soft button (bulk-select bar) ================= */
 .btn.soft {
   background: var(--primary-soft);
   border-color: transparent;
