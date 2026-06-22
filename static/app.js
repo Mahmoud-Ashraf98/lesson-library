@@ -34,6 +34,16 @@ let sortMode = "new";          // "new" | "az" | "used"
 let lastView = null;           // for list scroll restoration
 let listScroll = 0;
 let pickSearch = "";           // search text inside the plan material picker
+let selectMode = false;        // library bulk-select mode (session only)
+const selected = new Set();     // ids ticked while in select mode
+let showUntagged = false;      // library "needs tags" triage filter (session only)
+let tidyDismissed = false;     // hide the tidy nudge for this session
+// Unsaved-changes guard for the add/edit form. The form registers
+// { hash, isDirty }; onHashChange prompts before leaving a dirty form. The
+// revertingHash flag swallows the self-induced hashchange when we re-assert
+// the form hash, so the live form DOM (incl. in-memory picked files) survives.
+let formLeaveGuard = null;
+let revertingHash = false;
 
 function lsGet(k) {
   try { return localStorage.getItem(k); } catch (e) { return null; }
@@ -814,12 +824,14 @@ function openPlanDialog(plan) {
   });
 }
 
-async function createPlanFlow(firstMaterialId) {
+async function createPlanFlow(seed) {
+  // seed: a material id, an array of ids, or null — seeds the new plan's items
+  const ids = (Array.isArray(seed) ? seed : seed ? [seed] : []).filter(Boolean);
   const meta = await openPlanDialog(null);
   if (!meta) return null;
   const body = formBody({ ...meta,
-    items: JSON.stringify(firstMaterialId
-      ? [{ material_id: firstMaterialId, done: false, note: "" }] : []) });
+    items: JSON.stringify(
+      ids.map(id => ({ material_id: id, done: false, note: "" }))) });
   try {
     const out = await api("/api/plans", { method: "POST", body });
     replacePlan(out.plan);
@@ -832,19 +844,25 @@ async function createPlanFlow(firstMaterialId) {
 }
 
 function openPlanSheet(material) {
+  // Accepts a single material or an array (library bulk-select adds several).
+  const mats = Array.isArray(material) ? material : [material];
+  if (!mats.length) return;
+  const ids = mats.map(m => m.id);
   const dlg = $("#plansheet");
   if (!openDialog(dlg)) return;
-  $("#ps-mat").textContent = material.title;
+  $("#ps-mat").textContent = mats.length === 1
+    ? mats[0].title : `${mats.length} materials`;
   const plans = DB.plans || [];
   $("#ps-list").innerHTML = plans.length ? plans.map(p => {
-    const inPlan = p.items.some(it => it.material_id === material.id);
+    const have = new Set(p.items.map(it => it.material_id));
+    const allIn = ids.every(id => have.has(id));  // only "added" when every one is in
     return `<button type="button" class="sheetrow" data-pid="${esc(p.id)}"
-                    ${inPlan ? "disabled" : ""}>
-      ${icon(inPlan ? "circlecheck" : "calcheck")}
+                    ${allIn ? "disabled" : ""}>
+      ${icon(allIn ? "circlecheck" : "calcheck")}
       <span class="srcol"><span class="srtitle">${esc(p.title)}</span>
         <span class="srsub">${esc([p.group, fmtDate(p.plan_date)]
           .filter(Boolean).join(" · ") || p.items.length + " item(s)")}</span></span>
-      ${inPlan ? `<span class="srflag">added</span>` : ""}
+      ${allIn ? `<span class="srflag">added</span>` : ""}
     </button>`;
   }).join("") : `<p class="hint">No plans yet — create your first one.</p>`;
 
@@ -861,10 +879,15 @@ function openPlanSheet(material) {
     const plan = (DB.plans || []).find(p => p.id === row.dataset.pid);
     if (!plan) return;
     cleanup();
-    plan.items.push({ material_id: material.id, done: false, note: "" });
+    const have = new Set(plan.items.map(it => it.material_id));
+    const toAdd = ids.filter(id => !have.has(id));  // skip ones already in the plan
+    toAdd.forEach(id =>
+      plan.items.push({ material_id: id, done: false, note: "" }));
     try {
       await savePlan(plan);
-      toast(`Added to “${plan.title}”`);
+      toast(toAdd.length === 1
+        ? `Added to “${plan.title}”`
+        : `Added ${toAdd.length} to “${plan.title}”`);
     } catch (err) {
       toast("Could not update plan: " + err.message, "error");
     }
@@ -873,13 +896,21 @@ function openPlanSheet(material) {
   function onEsc(e) { e.preventDefault(); cleanup(); }
   async function onNew() {
     cleanup();
-    const plan = await createPlanFlow(material.id);
+    const plan = await createPlanFlow(ids);
     if (plan) location.hash = "#/plan/" + encodeURIComponent(plan.id);
   }
   $("#ps-list").addEventListener("click", onPick);
   $("#ps-cancel").addEventListener("click", onCancel);
   $("#ps-new").addEventListener("click", onNew);
   dlg.addEventListener("cancel", onEsc);
+}
+
+// The Undo half of a trash: move a folder back out of Trash/ into lessons/.
+// Reused by single delete (detail) and bulk delete (library select mode).
+async function restoreMaterial(trashName, preferredId) {
+  const out = await api("/api/trash/restore",
+    { method: "POST", body: formBody({ name: trashName, id: preferredId }) });
+  return out.restored;
 }
 
 /* ---- lightbox ---- */
@@ -976,6 +1007,30 @@ function render() {
     window.scrollTo(0, 0);
   }
   lastView = r.view;
+}
+
+// Routing entry point: guard a dirty form before any navigation (the in-form
+// Back link, bottom nav, and the Android hardware Back button all land here).
+function onHashChange() {
+  if (revertingHash) { revertingHash = false; return; }  // ignore the revert
+  if (formLeaveGuard && formLeaveGuard.isDirty() &&
+      location.hash !== formLeaveGuard.hash) {
+    const target = location.hash;
+    const guard = formLeaveGuard;
+    revertingHash = true;
+    location.hash = guard.hash;  // stay on the form — its DOM is left untouched
+    confirmDialog({
+      title: "Discard your changes?",
+      message: "You've made changes that aren't saved yet. " +
+        "Leaving now discards them.",
+      confirmLabel: "Discard",
+    }).then(ok => {
+      if (ok) { formLeaveGuard = null; location.hash = target; }
+    });
+    return;
+  }
+  formLeaveGuard = null;
+  render();
 }
 
 // ---- option helpers: canonical lists plus anything in use ----
@@ -1195,7 +1250,17 @@ function tokenMatches(token, hay, hayWords) {
   return false;
 }
 
+// A material "needs tags" when a core facet is empty — mirrors the server's
+// /api/health untagged check so the home nudge and Health agree.
+function isUntagged(m) {
+  return (!(m.cefr_levels || []).length && !(m.exam_targets || []).length)
+    || !(m.skills || []).length
+    || !(m.formats || []).length
+    || !(m.topics || []).length;
+}
+
 function matches(m) {
+  if (showUntagged && !isUntagged(m)) return false;
   for (const [key] of [...COMPACT_FACETS, ...MORE_FACETS]) {
     if (!intersects(filters[key], m[key])) return false;
   }
@@ -1254,12 +1319,13 @@ function saveRecentSearch(q) {
 }
 
 function isFiltered() {
-  return !!filters.q.trim() ||
+  return !!filters.q.trim() || showUntagged ||
     [...COMPACT_FACETS, ...MORE_FACETS].some(([k]) => filters[k].size);
 }
 
 // ---- list view ----
 function renderList() {
+  exitSelect();  // entering the list always starts with a clean selection
   const opts = filterOptions();
   view.innerHTML = `
     <div class="searchwrap">
@@ -1280,6 +1346,7 @@ function renderList() {
     </div>
     <div id="inboxbanner"></div>
     <div id="backupbanner"></div>
+    <div id="tidybanner"></div>
     <div id="filterpanel" class="filterpanel" ${filtersOpen ? "" : "hidden"}>
       <div id="facets">
         ${COMPACT_FACETS.map(([key, label]) => !opts[key].length ? "" : `
@@ -1312,6 +1379,9 @@ function renderList() {
                   aria-pressed="${listLayout === "grid"}" aria-label="Grid view"
                   title="Grid view">${icon("grid")}</button>
         </div>
+        <button id="selectbtn" class="iconbtn" type="button"
+                aria-label="Select materials" aria-pressed="false"
+                title="Select">${icon("circlecheck")}</button>
         <button id="dicebtn" class="iconbtn" type="button"
                 aria-label="Open a random matching material"
                 title="Surprise me">${icon("dice")}</button>
@@ -1327,6 +1397,7 @@ function renderList() {
 
   renderInboxBanner();
   renderBackupBanner();
+  renderTidyBanner();
 
   // "More filters" pickers reuse the combobox over values actually in use.
   const moreBox = $("#morefilters");
@@ -1428,7 +1499,17 @@ function renderList() {
     updateResults();
     $("#q").focus();
   });
-  $("#results").addEventListener("click", () => {
+  $("#results").addEventListener("click", e => {
+    if (selectMode) {
+      const card = e.target.closest(".card[href]");
+      if (!card) return;
+      e.preventDefault();  // tap toggles selection instead of opening
+      const id = decodeURIComponent(card.getAttribute("href").split("/").pop());
+      if (selected.has(id)) selected.delete(id); else selected.add(id);
+      card.classList.toggle("selected", selected.has(id));
+      updateSelbar();
+      return;
+    }
     if (filters.q.trim()) saveRecentSearch(filters.q);
   });
   $("#facets").addEventListener("click", e => {
@@ -1443,6 +1524,7 @@ function renderList() {
   });
   $("#clearbtn").addEventListener("click", () => {
     filters.q = "";
+    showUntagged = false;
     [...COMPACT_FACETS, ...MORE_FACETS].forEach(([k]) => filters[k].clear());
     renderList();
   });
@@ -1461,9 +1543,84 @@ function renderList() {
     toast(`Random pick from ${hits.length} match${hits.length === 1 ? "" : "es"}`);
     location.hash = "#/lesson/" + encodeURIComponent(pick.id);
   });
+  $("#selectbtn").addEventListener("click", () =>
+    selectMode ? exitSelect() : enterSelect());
 
   renderNeeds();
   updateResults();
+}
+
+// ---- library bulk select ----
+function selectedMaterials() {
+  return DB.lessons.filter(m => selected.has(m.id));
+}
+
+function enterSelect() {
+  selectMode = true;
+  document.body.classList.add("selecting");
+  const btn = $("#selectbtn");
+  if (btn) { btn.classList.add("on"); btn.setAttribute("aria-pressed", "true"); }
+  const res = $("#results");
+  if (res) res.classList.add("selectmode");
+  updateSelbar();
+}
+
+function exitSelect() {
+  selectMode = false;
+  selected.clear();
+  document.body.classList.remove("selecting");
+  const btn = $("#selectbtn");
+  if (btn) { btn.classList.remove("on"); btn.setAttribute("aria-pressed", "false"); }
+  const res = $("#results");
+  if (res) {
+    res.classList.remove("selectmode");
+    $$(".card.selected", res).forEach(c => c.classList.remove("selected"));
+  }
+  const bar = $("#selbar");
+  if (bar) bar.hidden = true;
+}
+
+function updateSelbar() {
+  const bar = $("#selbar");
+  if (!bar) return;
+  const n = selected.size;
+  bar.hidden = !selectMode;
+  $("#selcount").textContent = `${n} selected`;
+  $("#selplan").disabled = !n;
+  $("#seldel").disabled = !n;
+}
+
+async function bulkTrash(mats) {
+  if (!mats.length) return;
+  const ok = await confirmDialog({
+    title: `Delete ${mats.length} material${mats.length === 1 ? "" : "s"}?`,
+    message: "The folders move to LessonLibrary/Trash — nothing is erased. " +
+      "You can Undo right after.",
+    confirmLabel: "Move to Trash",
+  });
+  if (!ok) return;
+  const done = [];
+  for (const m of mats) {
+    try {
+      const out = await api("/api/lessons/" + encodeURIComponent(m.id) + "/trash",
+        { method: "POST" });
+      done.push({ trashed: out.trashed, id: m.id });
+    } catch (err) { /* skip; report the rest */ }
+  }
+  await refresh();
+  exitSelect();
+  render();  // rebuild the list without the trashed cards
+  if (!done.length) { toast("Could not delete", "error"); return; }
+  toast(`Moved ${done.length} to Trash`, "ok", { actions: [
+    { label: "Undo", onClick: async () => {
+        let back = 0;
+        for (const d of done) {
+          try { await restoreMaterial(d.trashed, d.id); back++; } catch (err) { /* skip */ }
+        }
+        await refresh();
+        render();
+        toast(`Restored ${back} material${back === 1 ? "" : "s"}`);
+    } }] });
 }
 
 function renderInboxBanner() {
@@ -1477,6 +1634,50 @@ function renderInboxBanner() {
         waiting in Inbox</strong> — tap to sort them</span>
       ${icon("chevron")}
     </a>`;
+}
+
+// "Tidy later" nudge: how many materials are missing core tags, with a
+// one-tap triage filter. Supports the share-fast/tidy-later workflow.
+function renderTidyBanner() {
+  const el = $("#tidybanner");
+  if (!el) return;
+  const n = DB.lessons.filter(isUntagged).length;
+  if (!n) { showUntagged = false; el.innerHTML = ""; return; }  // nothing left to tidy
+  if (tidyDismissed && !showUntagged) { el.innerHTML = ""; return; }
+  if (showUntagged) {
+    el.innerHTML = `
+      <div class="banner tidy">
+        ${icon("tags")}
+        <span class="bannertext"><strong>Showing ${n} material${n === 1 ? "" : "s"}
+          that need tags</strong></span>
+        <button id="tidyallbtn" class="textbtn" type="button">Show all</button>
+      </div>`;
+    $("#tidyallbtn").addEventListener("click", () => {
+      showUntagged = false;
+      updateResults();
+      renderTidyBanner();
+    });
+  } else {
+    el.innerHTML = `
+      <div class="banner tidy">
+        ${icon("tags")}
+        <button id="tidyreview" class="bannertext tidymain" type="button">
+          <strong>${n} material${n === 1 ? "" : "s"} need tags</strong> — tap to review</button>
+        <button id="tidyx" class="iconbtn small" type="button"
+                aria-label="Dismiss">${icon("x")}</button>
+      </div>`;
+    $("#tidyreview").addEventListener("click", () => {
+      showUntagged = true;
+      tidyDismissed = false;
+      updateResults();
+      renderTidyBanner();
+      window.scrollTo(0, 0);
+    });
+    $("#tidyx").addEventListener("click", () => {
+      tidyDismissed = true;
+      renderTidyBanner();
+    });
+  }
 }
 
 function sorted(arr) {
@@ -1509,7 +1710,9 @@ function updateResults() {
     ffx.textContent = nSel;
     ffx.hidden = !nSel;
   }
-  $("#results").className = listLayout === "grid" ? "results grid" : "results";
+  $("#results").className = (listLayout === "grid" ? "results grid" : "results")
+    + (selectMode ? " selectmode" : "");
+  if (selectMode) updateSelbar();
   if (hits.length) {
     $("#results").innerHTML = hits.map((m, i) =>
       cardHTML(m, Math.min(i, 8))).join("");
@@ -1527,7 +1730,9 @@ function updateResults() {
       <div class="emptystate">
         ${emptyArt()}
         <h3>Your library is empty</h3>
-        <p>Add your first worksheet, lesson plan, or flashcard set and it will be searchable forever.</p>
+        <p>Add your first worksheet, lesson plan, or flashcard set and it will be
+          searchable forever — or share files into Material Library from any app
+          and they'll wait for you in the Inbox.</p>
         <a class="btn primary" href="#/add">${icon("plus")}<span>Add material</span></a>
       </div>`;
   }
@@ -1593,7 +1798,10 @@ function cardHTML(m, i) {
       (f.note || "").toLowerCase().includes(t)));
     if (hitFile) foot.push(`<span class="topics">${icon("file")}${highlight(hitFile.name, q)}</span>`);
   }
-  return `<a class="card pop" style="--i:${i || 0}" href="#/lesson/${encodeURIComponent(m.id)}">
+  const sel = selected.has(m.id);
+  return `<a class="card pop${sel ? " selected" : ""}" style="--i:${i || 0}"
+             href="#/lesson/${encodeURIComponent(m.id)}">
+    <span class="cardcheck" aria-hidden="true">${icon("circlecheck")}</span>
     ${cardThumbHTML(m)}
     <div class="card-body">
       <div class="card-title">${highlight(m.title, filters.q)}</div>
@@ -2016,17 +2224,26 @@ function renderDetail(id) {
     const ok = await confirmDialog({
       title: `Delete “${m.title}”?`,
       message: "The folder moves to LessonLibrary/Trash — nothing is erased. " +
-        "To restore it, move the folder back into LessonLibrary/lessons " +
-        "with a file manager and tap Rescan.",
+        "You can Undo right after, or restore it later from a file manager.",
       confirmLabel: "Move to Trash",
     });
     if (!ok) return;
     $("#delbtn").disabled = true;
     try {
-      await api("/api/lessons/" + encodeURIComponent(m.id) + "/trash", { method: "POST" });
+      const out = await api("/api/lessons/" + encodeURIComponent(m.id) + "/trash",
+        { method: "POST" });
       await refresh();
       location.hash = "#/";
-      toast("Moved to Trash");
+      toast("Moved to Trash", "ok", { actions: [
+        { label: "Undo", onClick: async () => {
+            try {
+              const id = await restoreMaterial(out.trashed, m.id);
+              await refresh();
+              toast("Material restored", "ok", { actions: [
+                { label: "View", onClick: () =>
+                    location.hash = "#/lesson/" + encodeURIComponent(id) }] });
+            } catch (err) { toast("Could not restore: " + err.message, "error"); }
+        } }] });
     } catch (err) {
       toast("Delete failed: " + err.message, "error");
       $("#delbtn").disabled = false;
@@ -3969,6 +4186,17 @@ function renderForm({ view: mode, id }) {
     </form>`;
 
   // searchable multi-select comboboxes (one shared component)
+  // unsaved-changes tracking: any real edit arms the leave guard. Blanket
+  // input/change covers the text/number/file/checkbox controls; the handlers
+  // for chips, comboboxes, presets and file-removal call markDirty directly
+  // (they don't fire input/change). Programmatic prefills never call these,
+  // so opening a form is not "dirty" until the user acts.
+  let formDirty = false;
+  const markDirty = () => { formDirty = true; };
+  $("#f").addEventListener("input", markDirty);
+  $("#f").addEventListener("change", markDirty);
+  formLeaveGuard = { hash: location.hash, isDirty: () => formDirty };
+
   const boxes = new Map();
   const cbxDefs = [
     ["exam_targets", "Exam targets",
@@ -3987,7 +4215,7 @@ function renderForm({ view: mode, id }) {
       selected: material[key],
       allowCustom: true,
       placeholder: "Tap to search or add…",
-      onChange: () => refreshSuggestions(),
+      onChange: () => { markDirty(); refreshSuggestions(); },
     });
     $(`[data-slot="${key}"]`).replaceWith(box.el);
     boxes.set(key, box);
@@ -3999,6 +4227,7 @@ function renderForm({ view: mode, id }) {
     if (chip) {
       chip.classList.toggle("on");
       chip.setAttribute("aria-pressed", chip.classList.contains("on"));
+      markDirty();
       refreshSuggestions();
     }
   });
@@ -4151,6 +4380,7 @@ function renderForm({ view: mode, id }) {
     const btn = e.target.closest(".fremove");
     if (!btn) return;
     pickedFiles.splice(+btn.dataset.i, 1);
+    markDirty();
     renderPicked();
     refreshSuggestions();
   });
@@ -4209,6 +4439,7 @@ function renderForm({ view: mode, id }) {
     presetRow.addEventListener("click", e => {
       const chipEl = e.target.closest(".chip.preset");
       if (!chipEl) return;
+      markDirty();
       const p = PRESETS[+chipEl.dataset.p];
       const on = !presetApplied(p);
       const filled = [];
@@ -4311,6 +4542,7 @@ function renderForm({ view: mode, id }) {
         await api("/api/lessons/" + encodeURIComponent(id), { method: "POST", body: fd });
       }
       await refresh();
+      formLeaveGuard = null;  // a successful save leaves freely, no prompt
       location.hash = "#/lesson/" + encodeURIComponent(materialId);
       toast("Material saved");
     } catch (err) {
@@ -4384,13 +4616,20 @@ function initPullToRefresh() {
     if (v === "plans") newPlanFromFab();
     else location.hash = "#/add";
   });
+  // bulk-select action bar (body-level, bound once)
+  $("#seldone").addEventListener("click", exitSelect);
+  $("#selplan").addEventListener("click", () => {
+    const mats = selectedMaterials();
+    if (mats.length) openPlanSheet(mats);
+  });
+  $("#seldel").addEventListener("click", () => bulkTrash(selectedMaterials()));
   // close any open combobox panel when tapping elsewhere
   document.addEventListener("click", e => {
     $$(".cbx").forEach(c => {
       if (!c.contains(e.target)) $(".cbx-panel", c).hidden = true;
     });
   });
-  window.addEventListener("hashchange", render);
+  window.addEventListener("hashchange", onHashChange);
 
   // coming back to the app picks up file-manager changes automatically
   document.addEventListener("visibilitychange", () => {

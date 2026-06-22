@@ -1661,6 +1661,24 @@ def api_trash_empty():
     return jsonify(removed=removed)
 
 
+@app.post("/api/trash/restore")
+def api_trash_restore():
+    """Undo a material trash — the inverse of api_trash. `name` is the
+    trashed folder name api_trash returned; `id` is the material's preferred
+    (original) folder name. Re-scans so a restored folder rejoins the index
+    even if its sidecar was broken when it was trashed."""
+    name = clean_line(request.form.get("name"))
+    src = _resolve_child_dir(TRASH_DIR, name)  # traversal-safe (realpath check)
+    if src is None:
+        return jsonify(error="That item is no longer in the Trash."), 404
+    desired = slugify(clean_line(request.form.get("id")) or name)
+    dest_name = unique_slug(desired, LESSONS_DIR)  # heal a collision if the slug was reused
+    shutil.move(str(src), str(LESSONS_DIR / dest_name))
+    rebuild_index()  # takes LOCK internally — never call while holding it
+    log(f"restored Trash/{name!r} -> {dest_name!r}")
+    return jsonify(restored=dest_name)
+
+
 @app.get("/api/export.csv")
 def api_export_csv():
     with LOCK:

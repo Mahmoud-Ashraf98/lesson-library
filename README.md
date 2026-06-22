@@ -218,8 +218,10 @@ names that have since left the Inbox, and clearing it is one route
 
 Direct children of `Trash/` are whole moved folders (or files). Plan folders
 get a `plan-` prefix to avoid colliding with material names; any further
-collision gets a `-YYYYMMDD-HHMMSS` suffix. Restore = move back with a file
-manager + Rescan.
+collision gets a `-YYYYMMDD-HHMMSS` suffix. Restoring a material is one tap —
+the "Undo" action on the delete toast calls `POST /api/trash/restore` (the
+inverse of the trash move). Restoring by hand (move the folder back into
+`lessons/` + Rescan) still works for anything, any time.
 
 A `replace_all` restore (Feature E) first moves the live `lessons/`, `plans/`,
 `Inbox/`, `Trash/` into a sibling `Trash-restore-<YYYYMMDD-HHMMSS>/` folder, so
@@ -315,6 +317,7 @@ the form key. Structured fields are JSON strings inside form fields.
 | `/inbox-files/<name>` | GET | Serve a staged Inbox file (thumbnails on the Import screen) | file |
 | `/api/health` | GET | Stats: counts, byte totals, `untagged[]` (missing level/skills/format/topics), `trash[]` with sizes+ages, inbox summary, `data_dir` | JSON |
 | `/api/trash/empty` | POST | **Permanent delete** of Trash contents; optional `older_than_days` | `{removed}` |
+| `/api/trash/restore` | POST | Undo a material trash — move a folder back from `Trash/` into `lessons/`. `name` (the trashed folder name) + `id` (preferred restore name); a reused slug is healed by `unique_slug` | `{restored}` |
 | `/api/export.csv` | GET | Whole index as UTF-8-BOM CSV (Excel-safe), includes `times_used`/`last_used` | CSV attachment |
 | `/files/<id>/<name>` | GET | Serve a kit file (Range support, inline disposition) | file |
 
